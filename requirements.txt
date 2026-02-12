@@ -1,0 +1,11 @@
+pandas
+geopandas 
+shapely 
+requests
+pystac-client
+rasterio
+planetary-computer
+python-dotenv
+tqdm
+matplotlib
+pyqt5
