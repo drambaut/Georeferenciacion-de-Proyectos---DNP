@@ -1,0 +1,832 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SatView · Seguimiento de Obras</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Sora:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0e1117;
+    --surface: #161b26;
+    --surface2: #1e2535;
+    --border: #2a3347;
+    --accent: #3b82f6;
+    --accent2: #06b6d4;
+    --text: #e2e8f0;
+    --muted: #64748b;
+    --green: #10b981;
+    --amber: #f59e0b;
+    --tag-bg: #1e3a5f;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Sora', sans-serif;
+    min-height: 100vh;
+  }
+
+  /* HEADER */
+  .header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 0 24px;
+    height: 58px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+  .logo {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 17px;
+    font-weight: 700;
+    color: var(--text);
+    white-space: nowrap;
+  }
+  .logo-icon {
+    width: 28px; height: 28px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    border-radius: 7px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 14px;
+  }
+  .search-wrap {
+    flex: 1;
+    max-width: 480px;
+    position: relative;
+  }
+  .search-input {
+    width: 100%;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 14px 8px 38px;
+    color: var(--text);
+    font-family: 'DM Mono', monospace;
+    font-size: 13px;
+    outline: none;
+    transition: border-color .2s;
+  }
+  .search-input:focus { border-color: var(--accent); }
+  .search-icon {
+    position: absolute;
+    left: 12px; top: 50%;
+    transform: translateY(-50%);
+    color: var(--muted);
+    font-size: 14px;
+  }
+  .btn-buscar {
+    background: var(--accent);
+    border: none;
+    color: #fff;
+    font-family: 'Sora', sans-serif;
+    font-weight: 600;
+    font-size: 13px;
+    padding: 8px 18px;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background .2s, transform .1s;
+  }
+  .btn-buscar:hover { background: #2563eb; transform: translateY(-1px); }
+  .bpin-tag {
+    font-family: 'DM Mono', monospace;
+    font-size: 11px;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+  .bpin-tag span { color: var(--accent2); }
+
+  /* LAYOUT */
+  .layout {
+    display: grid;
+    grid-template-columns: 280px 1fr;
+    min-height: calc(100vh - 58px);
+  }
+
+  /* SIDEBAR */
+  .sidebar {
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+  }
+  .sidebar-section {
+    padding: 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  .sidebar-title {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--muted);
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    margin-bottom: 10px;
+  }
+  .info-grid {
+    display: grid;
+    gap: 6px;
+  }
+  .info-row {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+  .info-label {
+    font-size: 10px;
+    color: var(--muted);
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: .05em;
+  }
+  .info-value {
+    font-size: 12px;
+    color: var(--text);
+    font-weight: 500;
+  }
+  .info-value.mono { font-family: 'DM Mono', monospace; font-size: 11.5px; }
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: 600;
+  }
+  .badge-blue { background: var(--tag-bg); color: var(--accent); }
+  .badge-green { background: #052e16; color: var(--green); }
+  .badge-amber { background: #451a03; color: var(--amber); }
+  .progress-bar {
+    height: 5px;
+    background: var(--border);
+    border-radius: 99px;
+    margin-top: 4px;
+    overflow: hidden;
+  }
+  .progress-fill {
+    height: 100%;
+    border-radius: 99px;
+  }
+  .progress-fill.green { background: var(--green); }
+  .progress-fill.blue { background: var(--accent); }
+
+  /* YEAR SECTION */
+  .year-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    cursor: pointer;
+    padding: 10px 14px;
+    border-radius: 8px;
+    transition: background .15s;
+    user-select: none;
+  }
+  .year-toggle:hover { background: var(--surface2); }
+  .year-label {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .year-count {
+    font-size: 11px;
+    font-family: 'DM Mono', monospace;
+    color: var(--muted);
+  }
+  .chevron { transition: transform .2s; font-size: 12px; color: var(--muted); }
+  .chevron.open { transform: rotate(90deg); }
+
+  .img-list { display: flex; flex-direction: column; gap: 4px; padding: 4px 0; }
+  .img-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 12px;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background .15s;
+    border: 1px solid transparent;
+  }
+  .img-item:hover { background: var(--surface2); }
+  .img-item.selected { background: rgba(59,130,246,.12); border-color: rgba(59,130,246,.3); }
+  .img-checkbox {
+    width: 16px; height: 16px;
+    border-radius: 4px;
+    border: 1.5px solid var(--border);
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+    transition: all .15s;
+  }
+  .img-item.selected .img-checkbox {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+    font-size: 10px;
+  }
+  .img-date { font-size: 12px; font-weight: 500; flex: 1; }
+  .img-month { font-size: 10.5px; color: var(--muted); }
+  .s2-badge {
+    font-size: 9.5px;
+    font-weight: 700;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: rgba(6,182,212,.15);
+    color: var(--accent2);
+    border: 1px solid rgba(6,182,212,.3);
+    font-family: 'DM Mono', monospace;
+  }
+
+  /* MAIN AREA */
+  .main {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .toolbar {
+    padding: 10px 20px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    background: var(--surface);
+  }
+  .toolbar-label { font-size: 12px; color: var(--muted); }
+  .zoom-controls {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: auto;
+  }
+  .zoom-btn {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    width: 28px; height: 28px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 14px;
+    display: flex; align-items: center; justify-content: center;
+    transition: background .15s;
+  }
+  .zoom-btn:hover { background: var(--border); }
+  .zoom-val {
+    font-family: 'DM Mono', monospace;
+    font-size: 12px;
+    color: var(--muted);
+    min-width: 42px;
+    text-align: center;
+  }
+  .sync-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--surface2);
+    cursor: pointer;
+    font-size: 11px;
+    color: var(--muted);
+    transition: all .15s;
+    user-select: none;
+  }
+  .sync-toggle.active {
+    border-color: rgba(16,185,129,.4);
+    background: rgba(16,185,129,.1);
+    color: var(--green);
+  }
+  .sync-dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--muted);
+    transition: background .15s;
+  }
+  .sync-toggle.active .sync-dot { background: var(--green); }
+  .reset-btn {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    font-family: 'Sora', sans-serif;
+    font-size: 11px;
+    padding: 5px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all .15s;
+  }
+  .reset-btn:hover { border-color: var(--text); color: var(--text); }
+
+  /* COMPARISON AREA */
+  .compare-area {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0;
+    overflow: hidden;
+  }
+  .compare-panel {
+    display: flex;
+    flex-direction: column;
+    border-right: 1px solid var(--border);
+    overflow: hidden;
+    position: relative;
+  }
+  .compare-panel:last-child { border-right: none; }
+  .panel-header {
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: rgba(30,37,53,.5);
+    flex-shrink: 0;
+  }
+  .panel-date {
+    font-size: 12px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .panel-date .dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+  }
+  .dot-amber { background: var(--amber); }
+  .dot-green { background: var(--green); }
+  .panel-tag {
+    font-size: 10px;
+    color: var(--muted);
+    font-family: 'DM Mono', monospace;
+  }
+
+  .img-container {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    position: relative;
+    background: var(--bg);
+    cursor: grab;
+  }
+  .img-container:active { cursor: grabbing; }
+  .sat-img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    transition: transform .1s;
+    user-select: none;
+    pointer-events: none;
+  }
+
+  /* Fake satellite image using canvas-like gradient */
+  .fake-sat {
+    width: 320px;
+    height: 320px;
+    position: relative;
+    border-radius: 2px;
+    overflow: hidden;
+    transform-origin: center;
+    transition: transform .15s;
+  }
+  .sat-layer {
+    position: absolute;
+    inset: 0;
+  }
+
+  /* Empty state */
+  .empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    gap: 12px;
+    color: var(--muted);
+  }
+  .empty-icon { font-size: 40px; opacity: .3; }
+  .empty-text { font-size: 13px; text-align: center; line-height: 1.6; }
+
+  /* No selection warning */
+  .selection-warning {
+    padding: 10px 16px;
+    background: rgba(245,158,11,.06);
+    border-top: 1px solid rgba(245,158,11,.2);
+    font-size: 11px;
+    color: var(--amber);
+    text-align: center;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+  }
+
+  /* SCROLLBAR */
+  ::-webkit-scrollbar { width: 5px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 99px; }
+
+  /* Render mode toggle */
+  .render-toggle {
+    display: flex;
+    gap: 4px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 3px;
+  }
+  .render-opt {
+    padding: 3px 10px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: 600;
+    cursor: pointer;
+    color: var(--muted);
+    transition: all .15s;
+    user-select: none;
+  }
+  .render-opt.active {
+    background: var(--accent);
+    color: #fff;
+  }
+</style>
+</head>
+<body>
+
+<!-- HEADER -->
+<div class="header">
+  <div class="logo">
+    <div class="logo-icon">🛰️</div>
+    SatView
+  </div>
+  <div class="search-wrap">
+    <span class="search-icon">🔍</span>
+    <input class="search-input" id="searchInput" type="text" placeholder="Buscar por BPIN..." value="2021011000123">
+  </div>
+  <button class="btn-buscar" onclick="buscar()">Buscar</button>
+  <div class="bpin-tag" id="bpinTag">
+    BPIN <span>2021011000123</span> · Mejoramiento vial Ruta 45 – Tramo Cúcuta
+  </div>
+</div>
+
+<div class="layout">
+  <!-- SIDEBAR -->
+  <div class="sidebar">
+    <!-- PROJECT INFO -->
+    <div class="sidebar-section">
+      <div class="sidebar-title">Información del proyecto</div>
+      <div class="info-grid">
+        <div class="info-row">
+          <span class="info-label">Nombre</span>
+          <span class="info-value">Mejoramiento vial Ruta 45 – Tramo Cúcuta</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Sector</span>
+          <span class="info-value">Transporte</span>
+        </div>
+        <div class="info-row" style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+          <div>
+            <span class="info-label">Fase</span>
+            <span class="info-value"><span class="badge badge-blue">Ejecución</span></span>
+          </div>
+          <div>
+            <span class="info-label">Alcance</span>
+            <span class="info-value" style="font-size:11.5px">Nacional</span>
+          </div>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Total Proyecto</span>
+          <span class="info-value mono">$ 42.500.000.000</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Entidad ejecutora</span>
+          <span class="info-value" style="font-size:11.5px">Invías – Instituto Nacional de Vías</span>
+        </div>
+        <div class="info-row" style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+          <div>
+            <span class="info-label">Fecha inicial</span>
+            <span class="info-value mono">2022-03-01</span>
+          </div>
+          <div>
+            <span class="info-label">Fecha final</span>
+            <span class="info-value mono">2025-12-31</span>
+          </div>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Avance físico</span>
+          <div class="progress-bar"><div class="progress-fill green" style="width:67%"></div></div>
+          <span class="info-value" style="font-size:11px;color:var(--green)">67%</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Avance financiero</span>
+          <div class="progress-bar"><div class="progress-fill blue" style="width:54%"></div></div>
+          <span class="info-value" style="font-size:11px;color:var(--accent)">54%</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- IMAGE REPO -->
+    <div class="sidebar-section" style="flex:1">
+      <div class="sidebar-title">Imágenes disponibles</div>
+
+      <!-- 2025 -->
+      <div class="year-toggle" onclick="toggleYear('2025')">
+        <span class="year-label">
+          <span style="font-family:'DM Mono',monospace;font-size:14px">2025</span>
+          <span class="year-count">4 imágenes</span>
+        </span>
+        <span class="chevron open" id="chevron2025">▶</span>
+      </div>
+      <div id="list2025" class="img-list">
+        <div class="img-item" id="item_jan" onclick="toggleSelect('jan','Enero 2025','2025-01-15')">
+          <div class="img-checkbox">✓</div>
+          <div style="flex:1">
+            <div class="img-date">15 ene 2025</div>
+          </div>
+          <span class="s2-badge">S-2</span>
+        </div>
+        <div class="img-item selected" id="item_mar" onclick="toggleSelect('mar','Marzo 2025','2025-03-08')">
+          <div class="img-checkbox">✓</div>
+          <div style="flex:1">
+            <div class="img-date">08 mar 2025</div>
+          </div>
+          <span class="s2-badge">S-2</span>
+        </div>
+        <div class="img-item selected" id="item_jun" onclick="toggleSelect('jun','Junio 2025','2025-06-22')">
+          <div class="img-checkbox">✓</div>
+          <div style="flex:1">
+            <div class="img-date">22 jun 2025</div>
+          </div>
+          <span class="s2-badge">S-2</span>
+        </div>
+        <div class="img-item" id="item_sep" onclick="toggleSelect('sep','Septiembre 2025','2025-09-10')">
+          <div class="img-checkbox">✓</div>
+          <div style="flex:1">
+            <div class="img-date">10 sep 2025</div>
+          </div>
+          <span class="s2-badge">S-2</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="sidebar-section" style="padding:10px 16px;">
+      <div class="sidebar-title">Visualización</div>
+      <div class="render-toggle" id="renderToggle">
+        <div class="render-opt active" onclick="setRender('gray',this)">Escala grises</div>
+        <div class="render-opt" onclick="setRender('color',this)">Color</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- MAIN -->
+  <div class="main">
+    <div class="toolbar">
+      <span class="toolbar-label">Comparación de imágenes · Selecciona exactamente 2</span>
+      <div class="zoom-controls">
+        <span style="font-size:11px;color:var(--muted)">Zoom izq.:</span>
+        <button class="zoom-btn" onclick="changeZoom('left',-10)">−</button>
+        <span class="zoom-val" id="zoomLeft">100%</span>
+        <button class="zoom-btn" onclick="changeZoom('left',10)">+</button>
+        <span style="font-size:11px;color:var(--muted);margin-left:8px">der.:</span>
+        <button class="zoom-btn" onclick="changeZoom('right',-10)">−</button>
+        <span class="zoom-val" id="zoomRight">100%</span>
+        <button class="zoom-btn" onclick="changeZoom('right',10)">+</button>
+        <div class="sync-toggle active" id="syncToggle" onclick="toggleSync()">
+          <div class="sync-dot"></div>
+          <span>Sincronizar</span>
+        </div>
+        <button class="reset-btn" onclick="resetZoom()">↺ Reset</button>
+      </div>
+    </div>
+
+    <div class="compare-area" id="compareArea">
+      <!-- LEFT: older -->
+      <div class="compare-panel">
+        <div class="panel-header">
+          <div class="panel-date">
+            <div class="dot dot-amber"></div>
+            <span id="leftDate">Anterior · 08 mar 2025</span>
+          </div>
+          <span class="panel-tag">Sentinel-2</span>
+        </div>
+        <div class="img-container" id="imgContainerLeft">
+          <canvas id="canvasLeft" width="400" height="400" style="max-width:100%;max-height:100%;transform-origin:center;cursor:grab;"></canvas>
+        </div>
+      </div>
+
+      <!-- RIGHT: newer -->
+      <div class="compare-panel">
+        <div class="panel-header">
+          <div class="panel-date">
+            <div class="dot dot-green"></div>
+            <span id="rightDate">Reciente · 22 jun 2025</span>
+          </div>
+          <span class="panel-tag">Sentinel-2</span>
+        </div>
+        <div class="img-container" id="imgContainerRight">
+          <canvas id="canvasRight" width="400" height="400" style="max-width:100%;max-height:100%;transform-origin:center;cursor:grab;"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <div class="selection-warning" id="selWarning" style="display:none">
+      ⚠️ Debes seleccionar exactamente <strong>2 imágenes</strong> para comparar
+    </div>
+  </div>
+</div>
+
+<script>
+  // State
+  let selected = ['mar','jun'];
+  const images = {
+    jan: { label: '15 ene 2025', date: new Date('2025-01-15'), seed: 1 },
+    mar: { label: '08 mar 2025', date: new Date('2025-03-08'), seed: 2 },
+    jun: { label: '22 jun 2025', date: new Date('2025-06-22'), seed: 3 },
+    sep: { label: '10 sep 2025', date: new Date('2025-09-10'), seed: 4 },
+  };
+  let zoomLeft = 1, zoomRight = 1;
+  let syncZoom = true;
+  let renderMode = 'gray';
+
+  function buscar() {
+    const v = document.getElementById('searchInput').value.trim();
+    document.getElementById('bpinTag').innerHTML = `BPIN <span>${v}</span> · Mejoramiento vial Ruta 45 – Tramo Cúcuta`;
+  }
+
+  function toggleYear(y) {
+    const list = document.getElementById('list'+y);
+    const chev = document.getElementById('chevron'+y);
+    const open = list.style.display !== 'none';
+    list.style.display = open ? 'none' : 'flex';
+    chev.classList.toggle('open', !open);
+  }
+
+  function toggleSelect(id) {
+    const idx = selected.indexOf(id);
+    if (idx >= 0) {
+      selected.splice(idx, 1);
+    } else {
+      if (selected.length >= 2) {
+        // deselect oldest
+        const old = selected.shift();
+        document.getElementById('item_'+old).classList.remove('selected');
+        document.getElementById('item_'+old).querySelector('.img-checkbox').textContent = '';
+      }
+      selected.push(id);
+    }
+    document.querySelectorAll('.img-item').forEach(el => {
+      const id2 = el.id.replace('item_','');
+      const isSel = selected.includes(id2);
+      el.classList.toggle('selected', isSel);
+      el.querySelector('.img-checkbox').textContent = isSel ? '✓' : '';
+    });
+    updateCompare();
+  }
+
+  function updateCompare() {
+    const warn = document.getElementById('selWarning');
+    if (selected.length !== 2) {
+      warn.style.display = 'flex';
+      document.getElementById('leftDate').textContent = '—';
+      document.getElementById('rightDate').textContent = '—';
+      clearCanvas('canvasLeft');
+      clearCanvas('canvasRight');
+      return;
+    }
+    warn.style.display = 'none';
+    // Sort by date
+    const sorted = [...selected].sort((a,b) => images[a].date - images[b].date);
+    const older = images[sorted[0]];
+    const newer = images[sorted[1]];
+    document.getElementById('leftDate').textContent = `Anterior · ${older.label}`;
+    document.getElementById('rightDate').textContent = `Reciente · ${newer.label}`;
+    drawFakeSat('canvasLeft', older.seed, renderMode);
+    drawFakeSat('canvasRight', newer.seed, renderMode);
+  }
+
+  function clearCanvas(id) {
+    const c = document.getElementById(id);
+    const ctx = c.getContext('2d');
+    ctx.clearRect(0,0,c.width,c.height);
+    ctx.fillStyle = '#0e1117';
+    ctx.fillRect(0,0,c.width,c.height);
+  }
+
+  // Pseudo-random helper
+  function mulberry32(a) {
+    return function() {
+      a|=0; a=a+0x6D2B79F5|0;
+      let t=Math.imul(a^a>>>15,1|a);
+      t=t+Math.imul(t^t>>>7,61|t)^t;
+      return ((t^t>>>14)>>>0)/4294967296;
+    }
+  }
+
+  function drawFakeSat(canvasId, seed, mode) {
+    const c = document.getElementById(canvasId);
+    const ctx = c.getContext('2d');
+    const W = c.width, H = c.height;
+    const rng = mulberry32(seed * 12345);
+
+    // Background terrain
+    const imgData = ctx.createImageData(W, H);
+    const data = imgData.data;
+
+    // Generate noise
+    function noise(x, y, scale) {
+      const xi = Math.floor(x/scale), yi = Math.floor(y/scale);
+      const xf = (x/scale) - xi, yf = (y/scale) - yi;
+      const r1 = mulberry32((xi*374761 + yi*668265) ^ seed*1234567);
+      const r2 = mulberry32(((xi+1)*374761 + yi*668265) ^ seed*1234567);
+      const r3 = mulberry32((xi*374761 + (yi+1)*668265) ^ seed*1234567);
+      const r4 = mulberry32(((xi+1)*374761 + (yi+1)*668265) ^ seed*1234567);
+      const a = r1(), b = r2(), c2 = r3(), d = r4();
+      return a*(1-xf)*(1-yf) + b*xf*(1-yf) + c2*(1-xf)*yf + d*xf*yf;
+    }
+
+    for(let y=0;y<H;y++) {
+      for(let x=0;x<W;x++) {
+        const i = (y*W+x)*4;
+        let v = noise(x,y,40)*0.5 + noise(x,y,20)*0.3 + noise(x,y,10)*0.2;
+        v = Math.min(1,Math.max(0,v));
+
+        if(mode==='gray') {
+          const g = Math.floor(v*180+20);
+          data[i]=g; data[i+1]=g; data[i+2]=g; data[i+3]=255;
+        } else {
+          // False color: vegetation = green, bare = brown, water = blue
+          if(v > 0.6) { data[i]=30+Math.floor(v*60); data[i+1]=100+Math.floor(v*80); data[i+2]=30; }
+          else if(v > 0.35) { data[i]=120+Math.floor(v*60); data[i+1]=100+Math.floor(v*40); data[i+2]=60; }
+          else { data[i]=20; data[i+1]=40+Math.floor(v*80); data[i+2]=120+Math.floor(v*100); }
+          data[i+3]=255;
+        }
+      }
+    }
+    ctx.putImageData(imgData,0,0);
+
+    // Draw some roads/paths
+    ctx.strokeStyle = mode==='gray' ? 'rgba(230,230,230,0.5)' : 'rgba(255,220,100,0.6)';
+    ctx.lineWidth = 2;
+    const rng2 = mulberry32(seed*999);
+    for(let r=0;r<3;r++) {
+      ctx.beginPath();
+      ctx.moveTo(rng2()*W, rng2()*H);
+      ctx.bezierCurveTo(rng2()*W,rng2()*H,rng2()*W,rng2()*H,rng2()*W,rng2()*H);
+      ctx.stroke();
+    }
+  }
+
+  function changeZoom(side, delta) {
+    if (side === 'left') {
+      zoomLeft = Math.min(5, Math.max(0.5, zoomLeft + delta/100));
+      if(syncZoom) zoomRight = zoomLeft;
+    } else {
+      zoomRight = Math.min(5, Math.max(0.5, zoomRight + delta/100));
+      if(syncZoom) zoomLeft = zoomRight;
+    }
+    applyZoom();
+  }
+
+  function applyZoom() {
+    document.getElementById('zoomLeft').textContent = Math.round(zoomLeft*100)+'%';
+    document.getElementById('zoomRight').textContent = Math.round(zoomRight*100)+'%';
+    document.getElementById('canvasLeft').style.transform = `scale(${zoomLeft})`;
+    document.getElementById('canvasRight').style.transform = `scale(${zoomRight})`;
+  }
+
+  function toggleSync() {
+    syncZoom = !syncZoom;
+    const btn = document.getElementById('syncToggle');
+    btn.classList.toggle('active', syncZoom);
+  }
+
+  function resetZoom() {
+    zoomLeft = zoomRight = 1;
+    applyZoom();
+  }
+
+  function setRender(mode, el) {
+    renderMode = mode;
+    document.querySelectorAll('.render-opt').forEach(e => e.classList.remove('active'));
+    el.classList.add('active');
+    updateCompare();
+  }
+
+  // Init
+  document.querySelectorAll('.img-item').forEach(el => {
+    const id2 = el.id.replace('item_','');
+    const isSel = selected.includes(id2);
+    el.classList.toggle('selected', isSel);
+    el.querySelector('.img-checkbox').textContent = isSel ? '✓' : '';
+  });
+  updateCompare();
+</script>
+</body>
+</html>

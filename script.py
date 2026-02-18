@@ -1,149 +1,81 @@
+import openeo
+from pyproj import Transformer
 import os
-import re
-import requests
 import pandas as pd
-import geopandas as gpd
-from shapely.geometry import Point
-from pyproj import CRS
-from pystac_client import Client
-from datetime import datetime
-from tqdm import tqdm
-from dotenv import load_dotenv
+import re
+import numpy as np
 
-# CONFIGURACIÓN
-load_dotenv()
-CLIENT_ID = os.getenv("CLIENT_ID_COPERNICUS")
-CLIENT_SECRET = os.getenv("CLIENT_KEY_COPERNICUS")
+def descargar_imagen_por_año_sentinel2(bpin, lat, lon):
+    # 1) Conexión y Autenticación mejorada
+    connection = openeo.connect("openeo.dataspace.copernicus.eu")
+    print("Iniciando autenticación OIDC (revisa tu navegador)...")
+    auth_result = connection.authenticate_oidc(max_poll_time=120)
+    print(f"Resultado de autenticación: {auth_result}")
 
-START_YEAR = 2022
-END_YEAR = 2025   # 4 años → 8 imágenes (S1 y S2)
+    # 2) Crear Buffer de 1000m alrededor del punto
+    # Aproximación: 1 grado latitud ≈ 111km, 1 grado longitud ≈ 111km * cos(lat)
+    # Para mayor precisión usamos un offset simple en grados (0.009 aprox = 1km)
+# 2) Crear Buffer de 5 km alrededor del punto → 10 km x 10 km total
+    km_buffer = 5  # 5 km a cada lado
+    lat_buffer = km_buffer / 111
+    lon_buffer = km_buffer / (111 * np.cos(np.radians(lat)))
 
-BUFFER_METERS = 1000
-
-OUTPUT_S1 = "Sentinel1"
-OUTPUT_S2 = "Sentinel2"
-
-os.makedirs(OUTPUT_S1, exist_ok=True)
-os.makedirs(OUTPUT_S2, exist_ok=True)
-
-# AUTENTICACIÓN OAUTH2
-def get_access_token():
-    url = "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token"
-
-    data = {
-        "grant_type": "client_credentials",
-        "client_id": CLIENT_ID,
-        "client_secret": CLIENT_SECRET
+    spatial_extent = {
+        "west": lon - lon_buffer,
+        "south": lat - lat_buffer,
+        "east": lon + lon_buffer,
+        "north": lat + lat_buffer
     }
 
-    response = requests.post(url, data=data)
-    response.raise_for_status()
-    return response.json()["access_token"]
 
-token = get_access_token()
-headers = {"Authorization": f"Bearer {token}"}
+    # 3) Meses solicitados de 2025
+    meses_objetivo = ["01", "04", "07", "10", "12"]
+    
+    if not os.path.exists("EO_data_2025"):
+        os.makedirs("EO_data_2025")
 
-# CONVERTIR DMS A DECIMAL
-def dms_to_decimal(dms_str):
-    pattern = r"(\d+)°(\d+)'([\d.]+)\"([NSEW])"
-    match = re.match(pattern, dms_str.strip())
+    for mes in meses_objetivo:
+        print(f"--- Procesando Mes: {mes}/2025 ---")
+        
+        temporal_extent = [f"2025-{mes}-01", f"2025-{mes}-28"] # Rango mensual simplificado
 
-    degrees = float(match.group(1))
-    minutes = float(match.group(2))
-    seconds = float(match.group(3))
-    direction = match.group(4)
+        # 4) Cargar colección con filtro de nubes estricto para buscar la "menos nublada"
+        cube = connection.load_collection(
+            "SENTINEL2_L2A",
+            spatial_extent=spatial_extent,
+            temporal_extent=temporal_extent,
+            bands=["B02", "B03", "B04", "B08", "SCL"],
+            max_cloud_cover=50 # Filtramos imágenes con más del 20% de nubes
+        )
 
-    decimal = degrees + minutes/60 + seconds/3600
+        # 5) Aplicar máscara de nubes
+        cube = cube.process(
+            "mask_scl_dilation",
+            data=cube,
+            scl_band_name="SCL"
+        )
 
-    if direction in ["S", "W"]:
-        decimal *= -1
+        # 6) Reducción temporal con Mediana
+        # Esto genera la imagen compuesta del mes sin nubes
+        composite = cube.reduce_dimension(dimension="t", reducer="median")
 
-    return decimal
+        # 7) Escalar a reflectancia
+        composite = composite.apply(lambda x: x * 0.0001)
 
-# CONECTAR A STAC
-catalog = Client.open(
-    "https://stac.dataspace.copernicus.eu/v1/",
-    headers=headers
-)
+        # 8) Guardar y descargar Job
+        output_path = f"Imagenes/sentinel2_{bpin}/2025_{mes}.tiff"
+        
+        print(f"Enviando proceso al servidor para el mes {mes}...")
+        try:
+            # Ejecución síncrona para simplificar la descarga por mes
+            composite.download(output_path, format="GTiff")
+            print(f"Descargado: {output_path}")
+        except Exception as e:
+            print(f"Error procesando el mes {mes}: {e}")
 
-# FUNCIÓN DE DESCARGA
-def descargar_producto(url, filepath):
-
-    token = get_access_token()  # renovar siempre antes de descargar
-    headers = {"Authorization": f"Bearer {token}"}
-
-    with requests.get(url, headers=headers, stream=True, allow_redirects=True) as r:
-        if r.status_code == 401:
-            print("Token expirado, renovando...")
-            token = get_access_token()
-            headers = {"Authorization": f"Bearer {token}"}
-            r = requests.get(url, headers=headers, stream=True, allow_redirects=True)
-
-        r.raise_for_status()
-
-        with open(filepath, "wb") as f:
-            for chunk in r.iter_content(chunk_size=8192):
-                if chunk:
-                    f.write(chunk)
-
-def descargar_por_año(bpin, lat, lon):
-
-    point = Point(lon, lat)
-    gdf = gpd.GeoDataFrame(geometry=[point], crs="EPSG:4326")
-
-    # Convertir a UTM para buffer real en metros
-    utm_crs = CRS.from_user_input(gdf.estimate_utm_crs())
-    gdf_utm = gdf.to_crs(utm_crs)
-    gdf_utm["geometry"] = gdf_utm.buffer(BUFFER_METERS)
-
-    area = gdf_utm.to_crs("EPSG:4326").geometry.iloc[0]
-
-    for year in range(START_YEAR, END_YEAR + 1):
-
-        date_range = f"{year}-01-01/{year}-12-31"
-
-        for collection, folder in [
-            ("sentinel-2-l2a", OUTPUT_S2),
-            ("sentinel-1-grd", OUTPUT_S1)
-        ]:
-
-            search = catalog.search(
-                collections=[collection],
-                intersects=area,
-                datetime=date_range
-            )
-
-            items = list(search.items())
-
-            if not items:
-                print(f"No hay imágenes {collection} para {year}")
-                continue
-
-            # Elegimos la primera del año
-            item = items[0]
-
-            fecha = item.datetime.strftime("%d-%m-%Y")
-
-            if "Product" in item.assets:
-                asset = item.assets["Product"]
-                print("Asset accedido")
-            else:
-                print("No se encontró asset descargable")
-                return
-
-
-            url = asset.href
-            print(url)
-            filename = f"{bpin}_{fecha}.zip"
-            filepath = os.path.join(folder, filename)
-
-            print(f"Descargando {filename}")
-
-            descargar_producto(url, filepath)
-
-
+# Ejemplo de uso:
 # LEER EL EXCEL
-ruta_excel = r'd:\andres\Macc\DR\DNP\2026\ProyectoVC\base de datos\Base_de_proyectos__15_12_2025_(version_1).xlsx'
+ruta_excel = # ruta del excel con los proyectos
 
 df = pd.read_excel(
     ruta_excel,
@@ -151,16 +83,30 @@ df = pd.read_excel(
     header=[3,4]
 )
 
-# PROBAR SOLO PROYECTO 0
-row = df.iloc[0]
 
-bpin = row[("CARACTERIZACIÓN DEL PROYECTO", "BPIN")]
-lat_dms = row[("CARACTERIZACIÓN DEL PROYECTO", "LATITUD")]
-lon_dms = row[("CARACTERIZACIÓN DEL PROYECTO", "LONGITUD")]
+for i in range(12): # para descargar los 12 proyectos 
+    row = df.iloc[i]
 
-lat = dms_to_decimal(lat_dms)
-lon = dms_to_decimal(lon_dms)
+    bpin = row[("CARACTERIZACIÓN DEL PROYECTO", "BPIN")]
+    lat_dms = row[("CARACTERIZACIÓN DEL PROYECTO", "LATITUD")]
+    lon_dms = row[("CARACTERIZACIÓN DEL PROYECTO", "LONGITUD")]
 
-descargar_por_año(bpin, lat, lon)
+    def dms_to_decimal(dms_str):
+        pattern = r"(\d+)°(\d+)'([\d.]+)\"([NSEW])"
+        match = re.match(pattern, dms_str.strip())
+        degrees = float(match.group(1))
+        minutes = float(match.group(2))
+        seconds = float(match.group(3))
+        direction = match.group(4)
+        decimal = degrees + minutes/60 + seconds/3600
+        if direction in ["S", "W"]:
+            decimal *= -1
+        return decimal
 
-print("Proceso finalizado.")
+    lat = dms_to_decimal(lat_dms)
+    lon = dms_to_decimal(lon_dms)
+
+    print(f'lat: {lat}, long: {lon}')
+    print(f'----------------- DESCARGANDO IMAGENES DEL BPIN {bpin} --------------------------')
+    descargar_imagen_por_año_sentinel2(bpin, lat,lon)
+    print('-----------------------------------------------------------------------------------\n')
