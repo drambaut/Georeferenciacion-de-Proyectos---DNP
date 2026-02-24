@@ -281,6 +281,23 @@ def mostrar_imagen_con_zoom(arr: np.ndarray, key_zoom: str, label: str, color_do
     return zoom
 
 
+def dms_to_decimal(dms_str):
+    """Convierte coordenadas DMS a formato decimal."""
+    if pd.isna(dms_str) or not isinstance(dms_str, str):
+        return None
+    pattern = r"(\d+)°(\d+)'([\d.]+)\"([NSEW])"
+    match = re.search(pattern, str(dms_str).strip())
+    if not match:
+        return None
+    degrees = float(match.group(1))
+    minutes = float(match.group(2))
+    seconds = float(match.group(3))
+    direction = match.group(4)
+    decimal = degrees + minutes/60 + seconds/3600
+    if direction in ["S", "W"]:
+        decimal *= -1
+    return decimal
+
 # ──────────────────────────────────────────────
 # BARRA DE BÚSQUEDA SUPERIOR
 # ──────────────────────────────────────────────
@@ -455,67 +472,42 @@ with main_col:
         """, unsafe_allow_html=True)
         if len(seleccionadas) > 0:
             for img in seleccionadas:
-                st.caption(f"{img['label']}")
+                st.caption(f"✅ {img['label']}")
         st.stop()
 
     # Ordenar: izquierda = anterior, derecha = reciente
     par = sorted(seleccionadas, key=lambda x: x["fecha"] or datetime.min)
     anterior, reciente = par[0], par[1]
 
-    # Cargar arrays
-    with st.spinner("Renderizando imágenes…"):
-        arr_ant = renderizar_tiff(str(anterior["path"]), modo_key)
-        arr_rec = renderizar_tiff(str(reciente["path"]), modo_key)
+    # --- NUEVA VISUALIZACIÓN INTERACTIVA ---
+    st.markdown(f"### 🛰️ Comparación Sincronizada: {anterior['label']} vs {reciente['label']}")
+    
+    # 1. Obtener coordenadas para centrar el mapa
+    try:
+        lat = dms_to_decimal(proyecto.get("latitud"))
+        lon = dms_to_decimal(proyecto.get("longitud"))
+        if lat is None or lon is None:
+            raise ValueError("Coordenadas inválidas")
+    except Exception as e:
+        # Coordenadas por defecto (Centro de Colombia) si fallara la lectura
+        st.warning("No se pudieron leer las coordenadas exactas del proyecto. Mostrando vista por defecto.")
+        lat, lon = 4.5709, -74.2973 
 
-    # Controles de zoom globales
-    ctrl1, ctrl2, ctrl3, ctrl4 = st.columns([2, 2, 2, 1])
-    with ctrl1:
-        z_left = st.slider("Zoom anterior", 50, 400, 100, 10, key="zoom_left",
-                           label_visibility="visible")
-    with ctrl2:
-        z_right = st.slider("Zoom reciente", 50, 400, 100, 10, key="zoom_right",
-                            label_visibility="visible", disabled=sync_zoom)
-    with ctrl4:
-        if st.button("↺ Reset"):
-            st.session_state["zoom_left"] = 100
-            st.session_state["zoom_right"] = 100
-            st.rerun()
+    # 2. Crear el mapa interactivo usando leafmap.foliumap
+    m = leafmap.Map(center=[lat, lon], zoom=15, locate_control=True)
+    
+    # 3. Añadir la cortina (split map) con los GeoTIFFs locales
+    # localtileserver se encargará automáticamente de renderizar los TIFFs en el mapa
+    with st.spinner("Procesando GeoTIFFs para el mapa interactivo..."):
+        m.split_map(
+            left_layer=str(anterior["path"]), 
+            right_layer=str(reciente["path"]),
+            left_label=f"Anterior ({anterior['label']})",
+            right_label=f"Reciente ({reciente['label']})"
+        )
 
-    if sync_zoom:
-        z_right = z_left
-
-    # Columnas de imagen
-    col_ant, col_rec = st.columns(2, gap="small")
-
-    with col_ant:
-        st.markdown(f"""
-        <div class="img-panel-header">
-            <span class="panel-date">🟡 Anterior · {anterior['label']}</span>
-            <span class="panel-sat-tag">Sentinel-2</span>
-        </div>
-        """, unsafe_allow_html=True)
-        ancho_ant = max(2, min(int(5 * z_left / 100), 10))
-        fig_ant, ax_ant = plt.subplots(figsize=(ancho_ant, ancho_ant), facecolor='#0e1117')
-        ax_ant.imshow(arr_ant)
-        ax_ant.axis("off")
-        plt.tight_layout(pad=0)
-        st.pyplot(fig_ant, use_container_width=True)
-        plt.close(fig_ant)
-
-    with col_rec:
-        st.markdown(f"""
-        <div class="img-panel-header">
-            <span class="panel-date">🟢 Reciente · {reciente['label']}</span>
-            <span class="panel-sat-tag">Sentinel-2</span>
-        </div>
-        """, unsafe_allow_html=True)
-        ancho_rec = max(2, min(int(5 * z_right / 100), 10))
-        fig_rec, ax_rec = plt.subplots(figsize=(ancho_rec, ancho_rec), facecolor='#0e1117')
-        ax_rec.imshow(arr_rec)
-        ax_rec.axis("off")
-        plt.tight_layout(pad=0)
-        st.pyplot(fig_rec, use_container_width=True)
-        plt.close(fig_rec)
+    # 4. Mostrar el mapa en Streamlit
+    m.to_streamlit(height=600)
 
     # Info comparativa
     st.divider()
@@ -528,3 +520,88 @@ with main_col:
         if anterior["fecha"] and reciente["fecha"]:
             delta = (reciente["fecha"] - anterior["fecha"]).days
             st.metric("Diferencia temporal", f"{delta} días")
+
+# with main_col:
+
+#     if len(seleccionadas) != 2:
+#         st.markdown(f"""
+#         <div class="warn-box">
+#             ⚠️ Selecciona <strong>exactamente 2 imágenes</strong> en el panel izquierdo para comparar.<br>
+#             <small>Actualmente: {len(seleccionadas)} seleccionadas</small>
+#         </div>
+#         """, unsafe_allow_html=True)
+#         if len(seleccionadas) > 0:
+#             for img in seleccionadas:
+#                 st.caption(f"{img['label']}")
+#         st.stop()
+
+#     # Ordenar: izquierda = anterior, derecha = reciente
+#     par = sorted(seleccionadas, key=lambda x: x["fecha"] or datetime.min)
+#     anterior, reciente = par[0], par[1]
+
+#     # Cargar arrays
+#     with st.spinner("Renderizando imágenes…"):
+#         arr_ant = renderizar_tiff(str(anterior["path"]), modo_key)
+#         arr_rec = renderizar_tiff(str(reciente["path"]), modo_key)
+
+#     # Controles de zoom globales
+#     ctrl1, ctrl2, ctrl3, ctrl4 = st.columns([2, 2, 2, 1])
+#     with ctrl1:
+#         z_left = st.slider("Zoom anterior", 50, 400, 100, 10, key="zoom_left",
+#                            label_visibility="visible")
+#     with ctrl2:
+#         z_right = st.slider("Zoom reciente", 50, 400, 100, 10, key="zoom_right",
+#                             label_visibility="visible", disabled=sync_zoom)
+#     with ctrl4:
+#         if st.button("↺ Reset"):
+#             st.session_state["zoom_left"] = 100
+#             st.session_state["zoom_right"] = 100
+#             st.rerun()
+
+#     if sync_zoom:
+#         z_right = z_left
+
+#     # Columnas de imagen
+#     col_ant, col_rec = st.columns(2, gap="small")
+
+#     with col_ant:
+#         st.markdown(f"""
+#         <div class="img-panel-header">
+#             <span class="panel-date">🟡 Anterior · {anterior['label']}</span>
+#             <span class="panel-sat-tag">Sentinel-2</span>
+#         </div>
+#         """, unsafe_allow_html=True)
+#         ancho_ant = max(2, min(int(5 * z_left / 100), 10))
+#         fig_ant, ax_ant = plt.subplots(figsize=(ancho_ant, ancho_ant), facecolor='#0e1117')
+#         ax_ant.imshow(arr_ant)
+#         ax_ant.axis("off")
+#         plt.tight_layout(pad=0)
+#         st.pyplot(fig_ant, use_container_width=True)
+#         plt.close(fig_ant)
+
+#     with col_rec:
+#         st.markdown(f"""
+#         <div class="img-panel-header">
+#             <span class="panel-date">🟢 Reciente · {reciente['label']}</span>
+#             <span class="panel-sat-tag">Sentinel-2</span>
+#         </div>
+#         """, unsafe_allow_html=True)
+#         ancho_rec = max(2, min(int(5 * z_right / 100), 10))
+#         fig_rec, ax_rec = plt.subplots(figsize=(ancho_rec, ancho_rec), facecolor='#0e1117')
+#         ax_rec.imshow(arr_rec)
+#         ax_rec.axis("off")
+#         plt.tight_layout(pad=0)
+#         st.pyplot(fig_rec, use_container_width=True)
+#         plt.close(fig_rec)
+
+#     # Info comparativa
+#     st.divider()
+#     m1, m2, m3 = st.columns(3)
+#     with m1:
+#         st.metric("Imagen anterior", anterior["label"])
+#     with m2:
+#         st.metric("Imagen reciente", reciente["label"])
+#     with m3:
+#         if anterior["fecha"] and reciente["fecha"]:
+#             delta = (reciente["fecha"] - anterior["fecha"]).days
+#             st.metric("Diferencia temporal", f"{delta} días")
