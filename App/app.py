@@ -1,5 +1,5 @@
 """
-SatView - Seguimiento satelital de obras públicas
+SatView MVP - Seguimiento satelital de obras públicas
 Ejecutar con: streamlit run app.py
 """
 
@@ -7,28 +7,29 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from pathlib import Path
-import rasterio
-from rasterio.plot import reshape_as_image
-import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
 from datetime import datetime
 import re
-import io
-import base64
+import leafmap.foliumap as leafmap
+from dotenv import load_dotenv
+import os
+import rioxarray
+import rasterio
+import tempfile
+load_dotenv()
 
 # ──────────────────────────────────────────────
 # CONFIGURACIÓN
 # ──────────────────────────────────────────────
 st.set_page_config(
-    page_title="SatView · Obras",
+    page_title="SatView MVP · Obras",
     page_icon="🛰️",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
 # Ruta base donde están las carpetas de imágenes
-IMAGES_BASE_DIR = # Path(ruta de donde estan las carpetas con archivos.tiff)   # ← Ajusta a tu ruta
-EXCEL_PATH = # Path(Ruta del excel con los proyectos)  # ← Ajusta a tu ruta
+IMAGES_BASE_DIR = Path(os.getenv("IMAGES_BASE_DIR", "data/Imagenes"))
+EXCEL_PATH = Path(os.getenv("EXCEL_PATH", "data/Base_de_proyectos.xlsx"))
 
 # Meses en español para parsing del nombre de archivo
 MESES_ES = {
@@ -214,73 +215,6 @@ def listar_imagenes(carpeta: Path) -> list[dict]:
     return result
 
 
-@st.cache_data(show_spinner=False)
-def renderizar_tiff(path_str: str, modo: str = "gray") -> np.ndarray:
-    """
-    Carga un .tiff y lo renderiza como array RGB uint8.
-    modo: 'gray' (escala de grises) o 'color' (falso color)
-    """
-    with rasterio.open(path_str) as src:
-        bandas = src.count
-        if bandas >= 3 and modo == "color":
-            # Tomar bandas 3,2,1 como RGB aproximado (ajusta según tu dato)
-            r = src.read(3).astype(float)
-            g = src.read(2).astype(float)
-            b = src.read(1).astype(float)
-            def normalizar(arr):
-                p2, p98 = np.percentile(arr[arr > 0], (2, 98)) if arr[arr > 0].size else (0, 1)
-                return np.clip((arr - p2) / (p98 - p2 + 1e-9), 0, 1)
-            rgb = np.dstack([normalizar(r), normalizar(g), normalizar(b)])
-            return (rgb * 255).astype(np.uint8)
-        else:
-            # Escala de grises: primera banda o promedio
-            if bandas == 1:
-                arr = src.read(1).astype(float)
-            else:
-                arr = src.read(1).astype(float)  # banda 1
-            p2  = np.percentile(arr[arr > 0], 2)  if arr[arr > 0].size else 0
-            p98 = np.percentile(arr[arr > 0], 98) if arr[arr > 0].size else 1
-            arr = np.clip((arr - p2) / (p98 - p2 + 1e-9), 0, 1)
-            gray = (arr * 255).astype(np.uint8)
-            return np.dstack([gray, gray, gray])
-
-
-def array_a_png_b64(arr: np.ndarray) -> str:
-    """Convierte array RGB a base64 PNG."""
-    fig, ax = plt.subplots(figsize=(5, 5), dpi=100)
-    ax.imshow(arr)
-    ax.axis("off")
-    plt.tight_layout(pad=0)
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", bbox_inches="tight", pad_inches=0, dpi=100)
-    plt.close(fig)
-    buf.seek(0)
-    return base64.b64encode(buf.read()).decode()
-
-
-def mostrar_imagen_con_zoom(arr: np.ndarray, key_zoom: str, label: str, color_dot: str):
-    """Muestra imagen con control de zoom individual."""
-    dot = "🟡" if color_dot == "amber" else "🟢"
-    st.markdown(f"""
-    <div class="img-panel-header">
-        <span class="panel-date">{dot} {label}</span>
-        <span class="panel-sat-tag">Sentinel-2</span>
-    </div>
-    """, unsafe_allow_html=True)
-
-    zoom = st.slider("Zoom", 50, 400, 100, 10, key=key_zoom, label_visibility="collapsed")
-    ancho = int(5 * zoom / 100)
-    ancho = max(2, min(ancho, 12))
-
-    fig, ax = plt.subplots(figsize=(ancho, ancho))
-    ax.imshow(arr)
-    ax.axis("off")
-    plt.tight_layout(pad=0)
-    st.pyplot(fig, use_container_width=True)
-    plt.close(fig)
-    return zoom
-
-
 def dms_to_decimal(dms_str):
     """Convierte coordenadas DMS a formato decimal."""
     if pd.isna(dms_str) or not isinstance(dms_str, str):
@@ -298,13 +232,64 @@ def dms_to_decimal(dms_str):
         decimal *= -1
     return decimal
 
+def stretch_percentile(band):
+    p2, p98 = np.percentile(band, (2, 98))
+    band = np.clip((band - p2) / (p98 - p2), 0, 1)
+    band = np.power(band, 1/1.2)  # ligera corrección gamma
+    return band
+
+
+def generar_tiff_procesado(path_entrada, modo):
+
+    data = rioxarray.open_rasterio(path_entrada)
+
+    if modo == "natural":
+        bandas = data.sel(band=[3,2,1]).values.astype(float)
+
+    elif modo == "falso":
+        bandas = data.sel(band=[4,3,2]).values.astype(float)
+
+    elif modo == "gris":
+        banda = data.sel(band=3).values.astype(float)
+        banda = stretch_percentile(banda)
+        rgb = np.stack([banda, banda, banda])
+        bandas = rgb
+
+    else:
+        bandas = data.sel(band=[3,2,1]).values.astype(float)
+
+    if modo != "gris":
+        rgb = np.zeros_like(bandas)
+        for i in range(3):
+            rgb[i] = stretch_percentile(bandas[i])
+    else:
+        rgb = bandas
+
+    rgb_uint8 = (rgb * 255).astype(np.uint8)
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".tif", delete=False)
+
+    with rasterio.open(
+        tmp.name,
+        "w",
+        driver="GTiff",
+        height=rgb_uint8.shape[1],
+        width=rgb_uint8.shape[2],
+        count=3,
+        dtype=rasterio.uint8,
+        crs=data.rio.crs,
+        transform=data.rio.transform(),
+    ) as dst:
+        dst.write(rgb_uint8)
+
+    return tmp.name
 # ──────────────────────────────────────────────
 # BARRA DE BÚSQUEDA SUPERIOR
 # ──────────────────────────────────────────────
 
 col_logo, col_search, col_btn = st.columns([1, 5, 1])
 with col_logo:
-    st.markdown("## 🛰️ **SatView**")
+    st.markdown("## **SatView MVP**")
 with col_search:
     bpin_input = st.text_input(
         "Buscar BPIN",
@@ -313,7 +298,7 @@ with col_search:
         key="bpin_search",
     )
 with col_btn:
-    buscar_btn = st.button("Buscar", use_container_width=True, type="primary")
+    buscar_btn = st.button("🔍 Buscar", use_container_width=True, type="primary")
 
 st.divider()
 
@@ -322,19 +307,19 @@ st.divider()
 # ──────────────────────────────────────────────
 
 if not bpin_input:
-    st.info("Ingresa un BPIN en la barra de búsqueda para comenzar.")
+    st.info("👆 Ingresa un BPIN en la barra de búsqueda para comenzar.")
     st.stop()
 
 df = cargar_excel(EXCEL_PATH)
 proyecto = buscar_proyecto(df, bpin_input)
 
 if proyecto is None:
-    st.error(f"No se encontró el BPIN **{bpin_input}** en el Excel.")
+    st.error(f"❌ No se encontró el BPIN **{bpin_input}** en la base de datos.")
     st.stop()
 
 # Subtítulo con nombre
 nombre_proy = proyecto.get("nombre del proyecto", "Sin nombre")
-st.markdown(f"**BPIN** `{bpin_input}` · {nombre_proy}")
+st.markdown(f"## **BPIN** `{bpin_input}` - {nombre_proy}")
 st.markdown("")
 
 # Buscar carpeta de imágenes
@@ -435,7 +420,7 @@ with sidebar_col:
 
     seleccionadas = []
     for año, imgs in sorted(años.items()):
-        with st.expander(f"{año}  —  {len(imgs)} imágenes", expanded=True):
+        with st.expander(f"📅 {año}  —  {len(imgs)} imágenes", expanded=True):
             for img in imgs:
                 key_cb = f"cb_{img['filename']}"
                 checked = st.checkbox(
@@ -450,15 +435,13 @@ with sidebar_col:
     st.markdown('<div class="section-title">Visualización</div>', unsafe_allow_html=True)
     modo_render = st.radio(
         "Modo",
-        ["Escala de grises", "Falso color"],
+        ["Natural", "Escala de grises", "Falso color"],
         horizontal=True,
         label_visibility="collapsed",
     )
-    modo_key = "gray" if "grises" in modo_render else "color"
 
     # Sync zoom
-    sync_zoom = st.toggle("Sincronizar zoom", value=True)
-
+    sync_zoom = st.toggle("🔗 Sincronizar zoom", value=True)
 
 # ──── ÁREA PRINCIPAL DE COMPARACIÓN ────
 with main_col:
@@ -499,18 +482,27 @@ with main_col:
     # 3. Añadir la cortina (split map) con los GeoTIFFs locales
     # localtileserver se encargará automáticamente de renderizar los TIFFs en el mapa
     with st.spinner("Procesando GeoTIFFs para el mapa interactivo..."):
+        if modo_render == "Escala de grises":
+            modo = "gris"
+        elif modo_render == "Falso color":
+            modo = "falso"
+        else:
+            modo = "natural"
+
+        with st.spinner("Procesando GeoTIFFs para render profesional..."):
+            left_tif = generar_tiff_procesado(str(anterior["path"]), modo)
+            right_tif = generar_tiff_procesado(str(reciente["path"]), modo)
+
         m.split_map(
-            left_layer=str(anterior["path"]), 
-            right_layer=str(reciente["path"]),
+            left_layer=left_tif,
+            right_layer=right_tif,
             left_label=f"Anterior ({anterior['label']})",
             right_label=f"Reciente ({reciente['label']})"
         )
-
-    # 4. Mostrar el mapa en Streamlit
-    m.to_streamlit(height=600)
+    
+    st.divider()
 
     # Info comparativa
-    st.divider()
     m1, m2, m3 = st.columns(3)
     with m1:
         st.metric("Imagen anterior", anterior["label"])
@@ -521,87 +513,7 @@ with main_col:
             delta = (reciente["fecha"] - anterior["fecha"]).days
             st.metric("Diferencia temporal", f"{delta} días")
 
-# with main_col:
 
-#     if len(seleccionadas) != 2:
-#         st.markdown(f"""
-#         <div class="warn-box">
-#             ⚠️ Selecciona <strong>exactamente 2 imágenes</strong> en el panel izquierdo para comparar.<br>
-#             <small>Actualmente: {len(seleccionadas)} seleccionadas</small>
-#         </div>
-#         """, unsafe_allow_html=True)
-#         if len(seleccionadas) > 0:
-#             for img in seleccionadas:
-#                 st.caption(f"{img['label']}")
-#         st.stop()
-
-#     # Ordenar: izquierda = anterior, derecha = reciente
-#     par = sorted(seleccionadas, key=lambda x: x["fecha"] or datetime.min)
-#     anterior, reciente = par[0], par[1]
-
-#     # Cargar arrays
-#     with st.spinner("Renderizando imágenes…"):
-#         arr_ant = renderizar_tiff(str(anterior["path"]), modo_key)
-#         arr_rec = renderizar_tiff(str(reciente["path"]), modo_key)
-
-#     # Controles de zoom globales
-#     ctrl1, ctrl2, ctrl3, ctrl4 = st.columns([2, 2, 2, 1])
-#     with ctrl1:
-#         z_left = st.slider("Zoom anterior", 50, 400, 100, 10, key="zoom_left",
-#                            label_visibility="visible")
-#     with ctrl2:
-#         z_right = st.slider("Zoom reciente", 50, 400, 100, 10, key="zoom_right",
-#                             label_visibility="visible", disabled=sync_zoom)
-#     with ctrl4:
-#         if st.button("↺ Reset"):
-#             st.session_state["zoom_left"] = 100
-#             st.session_state["zoom_right"] = 100
-#             st.rerun()
-
-#     if sync_zoom:
-#         z_right = z_left
-
-#     # Columnas de imagen
-#     col_ant, col_rec = st.columns(2, gap="small")
-
-#     with col_ant:
-#         st.markdown(f"""
-#         <div class="img-panel-header">
-#             <span class="panel-date">🟡 Anterior · {anterior['label']}</span>
-#             <span class="panel-sat-tag">Sentinel-2</span>
-#         </div>
-#         """, unsafe_allow_html=True)
-#         ancho_ant = max(2, min(int(5 * z_left / 100), 10))
-#         fig_ant, ax_ant = plt.subplots(figsize=(ancho_ant, ancho_ant), facecolor='#0e1117')
-#         ax_ant.imshow(arr_ant)
-#         ax_ant.axis("off")
-#         plt.tight_layout(pad=0)
-#         st.pyplot(fig_ant, use_container_width=True)
-#         plt.close(fig_ant)
-
-#     with col_rec:
-#         st.markdown(f"""
-#         <div class="img-panel-header">
-#             <span class="panel-date">🟢 Reciente · {reciente['label']}</span>
-#             <span class="panel-sat-tag">Sentinel-2</span>
-#         </div>
-#         """, unsafe_allow_html=True)
-#         ancho_rec = max(2, min(int(5 * z_right / 100), 10))
-#         fig_rec, ax_rec = plt.subplots(figsize=(ancho_rec, ancho_rec), facecolor='#0e1117')
-#         ax_rec.imshow(arr_rec)
-#         ax_rec.axis("off")
-#         plt.tight_layout(pad=0)
-#         st.pyplot(fig_rec, use_container_width=True)
-#         plt.close(fig_rec)
-
-#     # Info comparativa
-#     st.divider()
-#     m1, m2, m3 = st.columns(3)
-#     with m1:
-#         st.metric("Imagen anterior", anterior["label"])
-#     with m2:
-#         st.metric("Imagen reciente", reciente["label"])
-#     with m3:
-#         if anterior["fecha"] and reciente["fecha"]:
-#             delta = (reciente["fecha"] - anterior["fecha"]).days
-#             st.metric("Diferencia temporal", f"{delta} días")
+    st.divider()
+    # 4. Mostrar el mapa en Streamlit
+    m.to_streamlit(height=600)

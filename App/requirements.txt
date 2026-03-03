@@ -6,3 +6,7 @@ numpy>=1.24.0
 matplotlib>=3.7.0
 leafmap
 localtileserver
+python-dotenv>=1.0.0
+rioxarray>=0.15.0
+xarray>=2023.0.0
+folium>=0.15.0

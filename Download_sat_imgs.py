@@ -4,6 +4,11 @@ import os
 import pandas as pd
 import re
 import numpy as np
+ 
+meses_objetivo = ["01", "02","03","04","05","06","07","08","09","10","11","12"] # qué meses descargarás
+anio = '2025' # año sobre el que trabajaras
+nobosidad = 40 # porcentaje máximo de nubosdad
+proyectos = [0] # de los 12 proyectos
 
 def descargar_imagen_por_año_sentinel2(bpin, lat, lon):
     # 1) Conexión y Autenticación mejorada
@@ -28,16 +33,14 @@ def descargar_imagen_por_año_sentinel2(bpin, lat, lon):
     }
 
 
-    # 3) Meses solicitados de 2025
-    meses_objetivo = ["01", "04", "07", "10", "12"]
     
-    if not os.path.exists("EO_data_2025"):
-        os.makedirs("EO_data_2025")
+    if not os.path.exists(f"EO_data_{anio}"):
+        os.makedirs(f"EO_data_{anio}")
 
     for mes in meses_objetivo:
-        print(f"--- Procesando Mes: {mes}/2025 ---")
+        print(f"--- Procesando Mes: {mes}/{anio} ---")
         
-        temporal_extent = [f"2025-{mes}-01", f"2025-{mes}-28"] # Rango mensual simplificado
+        temporal_extent = [f"{anio}-{mes}-01", f"{anio}-{mes}-25"] # Rango mensual simplificado
 
         # 4) Cargar colección con filtro de nubes estricto para buscar la "menos nublada"
         cube = connection.load_collection(
@@ -45,7 +48,7 @@ def descargar_imagen_por_año_sentinel2(bpin, lat, lon):
             spatial_extent=spatial_extent,
             temporal_extent=temporal_extent,
             bands=["B02", "B03", "B04", "B08", "SCL"],
-            max_cloud_cover=50 # Filtramos imágenes con más del 20% de nubes
+            max_cloud_cover=50 # Filtramos imágenes con más del 50% de nubes
         )
 
         # 5) Aplicar máscara de nubes
@@ -63,28 +66,28 @@ def descargar_imagen_por_año_sentinel2(bpin, lat, lon):
         composite = composite.apply(lambda x: x * 0.0001)
 
         # 8) Guardar y descargar Job
-        output_path = f"Imagenes/sentinel2_{bpin}/2025_{mes}.tiff"
+        output_path = f"Imagenes/sentinel2_{bpin}/{anio}_{mes}.tiff"
         
         print(f"Enviando proceso al servidor para el mes {mes}...")
         try:
             # Ejecución síncrona para simplificar la descarga por mes
             composite.download(output_path, format="GTiff")
-            print(f"Descargado: {output_path}")
+            print(f"✅ Descargado: {output_path}")
         except Exception as e:
-            print(f"Error procesando el mes {mes}: {e}")
+            print(f"❌ Error procesando el mes {mes}: {e}")
 
 # Ejemplo de uso:
 # LEER EL EXCEL
-ruta_excel = # ruta del excel con los proyectos
+EXCEL_PATH = Path(os.getenv("EXCEL_PATH", "data/Base_de_proyectos.xlsx"))
 
 df = pd.read_excel(
-    ruta_excel,
+    EXCEL_PATH,
     sheet_name="Proyectos seleccionados",
     header=[3,4]
 )
 
-
-for i in range(12): # para descargar los 12 proyectos 
+# PROBAR SOLO PROYECTO 0
+for i in proyectos: # 
     row = df.iloc[i]
 
     bpin = row[("CARACTERIZACIÓN DEL PROYECTO", "BPIN")]
