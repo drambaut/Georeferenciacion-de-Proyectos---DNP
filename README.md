@@ -1,89 +1,190 @@
-# 🛰️ SatView · Seguimiento Satelital de Obras
+# 🛰️ SatView · Seguimiento Satelital de Obras Públicas
 
-Aplicación Streamlit para visualizar y comparar imágenes Sentinel-2 de proyectos de construcción.
+Aplicación Streamlit para visualizar y comparar imágenes Sentinel-2 de proyectos de construcción financiados con recursos SGR. Permite buscar un proyecto por BPIN, consultar su ficha técnica y comparar imágenes satelitales en el tiempo para seguir la evolución física de la obra.
 
-## Estructura esperada de archivos
+---
+
+## Arquitectura
 
 ```
-tu_proyecto/
-├── app.py
+Supabase Storage (bucket: sentinel-images)
+  └── sentinel2_{BPIN}/
+        ├── 2025_01.tiff
+        ├── 2025_03.tiff
+        └── ...
+
+Supabase DB (tabla: proyectos)
+  └── 21 columnas con datos del proyecto (BPIN, avances, entidad, etc.)
+
+Streamlit App
+  └── Busca proyecto en DB → lista imágenes en Storage → renderiza comparador
+```
+
+---
+
+## Estructura del repositorio
+
+```
+satview/
+├── app.py                  ← Aplicación principal
+├── Dockerfile
+├── .env                    ← Variables de entorno (no subir a git)
+├── .env.example
 ├── requirements.txt
-├── proyectos.xlsx          ← Tu Excel con los proyectos
-└── imagenes/
-    ├── Sentinel2_2021011000123/
-    │   ├── 2021011000123_2025_01.tiff
-    │   ├── 2021011000123_2025_03.tiff
-    │   ├── 2021011000123_2025_06.tiff
-    │   └── 2021011000123_2025_09.tiff
-    ├── Sentinel2_2021011000456/
-    │   └── ...
-    └── ...
+└── utils/
+    ├── verificar_supabase.py
+    └── verificar_bucket.py
 ```
 
-## Columnas requeridas en el Excel
+---
 
-El Excel `proyectos.xlsx` debe tener al menos estas columnas (los nombres exactos importan):
+## Variables de entorno
+
+Crea un archivo `.env` en la raíz con:
+
+```env
+SUPABASE_URL=https://xxxxxxxxxxxx.supabase.co
+SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+```
+
+---
+
+## Supabase: configuración requerida
+
+### 1. Tabla `proyectos`
+
+Ejecuta `utils/1_crear_tabla_supabase.sql` en el SQL Editor de Supabase.
+
+Columnas utilizadas por la app:
 
 | Columna | Descripción |
 |---|---|
-| BPIN | Código único del proyecto |
-| Nombre del proyecto | |
-| Sector | |
-| Alcance | |
-| Fase | |
-| Total Proyecto | |
-| Instancia de Aprobación | |
-| Fecha de Aprobación | |
-| Entidad ejecutora | |
-| NIT entidad ejecutora | |
-| Valor total contratos | |
-| Número de contratos | |
-| Fecha inicial prog. | |
-| Fecha final prog. | |
-| Total pagos | |
-| Avance físico | Porcentaje (ej: 67 o 67%) |
-| Avance financiero | Porcentaje (ej: 54 o 54%) |
+| `bpin` | Código único del proyecto (índice) |
+| `nombre_del_proyecto` | |
+| `sector` | |
+| `alcance` | |
+| `fase_del_proyecto` | |
+| `total_proyecto` | |
+| `instancia_de_aprobacion_inicial` | |
+| `fecha_aprobacion` | |
+| `entidad_ejecutora` | |
+| `nit_entidad_ejecutora` | |
+| `valor_total_de_los_contratos` | |
+| `numero_de_contratos_asociados` | |
+| `fecha_inicial_de_la_programacion` | |
+| `fecha_final_de_la_programacion` | |
+| `total_pagos_al_proyecto` | |
+| `avance_fisico` | Porcentaje (ej: 67 o 67%) |
+| `avance_financiero` | Porcentaje (ej: 54 o 54%) |
+| `latitud` | Formato DMS (ej: 9°31'26.7"N) |
+| `longitud` | Formato DMS (ej: 75°33'56.1"W) |
+| `georreferenciacion` | Descripción textual |
 
-## Nombre de archivos .tiff
+### 2. Políticas RLS (Row Level Security)
 
-El patrón esperado es:
+Ejecuta en el SQL Editor:
+
+```sql
+-- Lectura pública de la tabla proyectos
+CREATE POLICY "allow_select"
+ON proyectos FOR SELECT TO anon USING (true);
+
+-- Lectura pública del bucket de imágenes
+CREATE POLICY "allow_anon_read"
+ON storage.objects FOR SELECT TO anon
+USING (bucket_id = 'sentinel-images');
 ```
-<BPIN>_<AÑO>_<MES>.tiff
+
+### 3. Bucket de imágenes
+
+- Nombre: `sentinel-images`
+- Tipo: Private (acceso vía signed URLs)
+- Estructura de paths:
+
+```
+sentinel2_{BPIN}/2025_01.tiff
+sentinel2_{BPIN}/2025_03.tiff
+```
+
+### 4. Importar proyectos desde CSV
+
+```bash
+# Preparar el CSV desde el Excel original
+python utils/2_importar_proyectos.py --csv tu_archivo.csv --dry-run
+
+# Subir a Supabase (requiere SUPABASE_SERVICE_KEY en .env)
+python utils/2_importar_proyectos.py --csv tu_archivo.csv
+```
+
+> El CSV de origen usa separador `;`, codificación `latin-1`, y doble header (fila 0 = grupos, fila 1 = nombres).
+
+---
+
+## Nombre de archivos TIFF
+
+El patrón esperado dentro de cada carpeta es:
+
+```
+<AÑO>_<MES>.tiff
 ```
 
 Ejemplos válidos:
-- `2021011000123_2025_01.tiff`
-- `2021011000123_2025_march.tiff`
-- `2021011000123_2025_jun.tiff`
+- `2025_01.tiff`
+- `2025_06.tiff`
 
-## Instalación y ejecución
+---
+
+## Instalación local
 
 ```bash
-# 1. Instalar dependencias
+# 1. Clonar el repositorio
+git clone https://github.com/tu-org/satview.git
+cd satview
+
+# 2. Crear entorno virtual
+python -m venv venv
+source venv/bin/activate        # Linux/Mac
+venv\Scripts\activate           # Windows
+
+# 3. Instalar dependencias
 pip install -r requirements.txt
 
-# 2. (Solo si hay problemas con rasterio en Windows)
-conda install -c conda-forge rasterio
+# 4. Configurar variables de entorno
+cp .env.example .env
+# Edita .env con tus credenciales de Supabase
 
-# 3. Ejecutar
+# 5. Ejecutar
 streamlit run app.py
 ```
 
-## Ajustes en app.py
+> **Nota Windows:** si hay problemas con `rasterio`, instala con conda:
+> ```bash
+> conda install -c conda-forge rasterio
+> ```
 
-Al inicio del archivo `app.py`, ajusta estas dos líneas con tus rutas:
+---
 
-```python
-IMAGES_BASE_DIR = Path("./imagenes")   # Carpeta raíz con las carpetas Sentinel2_*
-EXCEL_PATH = Path("./proyectos.xlsx")  # Tu archivo Excel
+## Despliegue con Docker
+
+```bash
+# Construir imagen
+docker build -t satview .
+
+# Correr contenedor
+docker run -p 8501:8501 --env-file .env satview
 ```
+
+Accede en: `http://localhost:8501`
+
+---
 
 ## Funcionalidades
 
-- 🔍 Búsqueda por BPIN
-- 📊 Ficha completa del proyecto con barras de avance
-- 📅 Repositorio de imágenes agrupado por año
-- 🖼️ Comparación lado a lado de 2 imágenes (requiere selección exacta de 2)
-- 🔍 Zoom independiente por imagen
-- 🔗 Opción de sincronizar zoom entre ambas imágenes
-- 🎨 Visualización en escala de grises o falso color
+- 🔍 Búsqueda de proyectos por BPIN
+- 📊 Ficha completa con barras de avance físico y financiero
+- 🗺️ Mapa interactivo centrado en las coordenadas del proyecto
+- 📅 Repositorio de imágenes Sentinel-2 agrupado por año
+- 🖼️ Comparador lado a lado con slider sincronizado
+- 🎨 Modos de visualización: natural, escala de grises, falso color
+- ☁️ Imágenes servidas desde Supabase Storage (sin archivos locales)
+- 🗄️ Datos de proyectos en Supabase DB (sin Excel local)

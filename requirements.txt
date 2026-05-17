@@ -17,3 +17,4 @@ pystac-client
 planetary-computer
 tqdm
 pyqt5
+supabase>=2.0.0

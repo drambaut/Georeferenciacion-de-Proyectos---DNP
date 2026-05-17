@@ -15,6 +15,8 @@ import os
 import rioxarray
 import rasterio
 import tempfile
+from supabase import create_client
+import tempfile, requests
 load_dotenv()
 
 # ──────────────────────────────────────────────
@@ -28,8 +30,11 @@ st.set_page_config(
 )
 
 # Ruta base donde están las carpetas de imágenes
-IMAGES_BASE_DIR = Path(os.getenv("IMAGES_BASE_DIR", "data/Imagenes"))
-EXCEL_PATH = Path(os.getenv("EXCEL_PATH", "data/Base_de_proyectos.xlsx"))
+
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_ANON_KEY")
+sb = create_client(SUPABASE_URL, SUPABASE_KEY)
+BUCKET = "sentinel-images"
 
 # Meses en español para parsing del nombre de archivo
 MESES_ES = {
@@ -139,45 +144,10 @@ st.markdown("""
 # FUNCIONES AUXILIARES
 # ──────────────────────────────────────────────
 
-@st.cache_data(show_spinner=False)
-def cargar_excel(path: Path) -> pd.DataFrame:
-    """Carga el Excel con los proyectos."""
-    try:
-        df = pd.read_excel(
-        EXCEL_PATH,
-        sheet_name="Proyectos seleccionados",
-        header=4 #Solo estamos usando el header del nombre de la variale
-    )
-        df.columns = (
-        df.columns
-        .str.strip()
-        .str.lower()
-        )
-        return df
-    except Exception as e:
-        st.error(f"Error cargando Excel: {e}")
-        return pd.DataFrame()
-
-
-def buscar_proyecto(df: pd.DataFrame, bpin: str) -> dict | None:
-    """Busca un proyecto por BPIN."""
-    if df.empty:
-        return None
-    bpin_col = df["bpin"].astype(str).str.strip()
-    bpin_input = str(bpin).strip()
-    fila = df[bpin_col == bpin_input]
-    if fila.empty:
-        return None
-    return fila.iloc[0].to_dict()
-
-
-def encontrar_carpeta(bpin: str) -> Path | None:
-    """Localiza la carpeta Sentinel2_<BPIN>."""
-    carpeta = IMAGES_BASE_DIR / f"Sentinel2_{bpin}"
-    if carpeta.exists() and carpeta.is_dir():
-        return carpeta
-    return None
-
+@st.cache_data(ttl=600, show_spinner=False)
+def buscar_proyecto_supabase(bpin: str) -> dict | None:
+    res = sb.table("proyectos").select("*").eq("bpin", bpin.strip()).execute()
+    return res.data[0] if res.data else None
 
 def parsear_fecha_archivo(filename: str) -> datetime | None:
     """
@@ -197,23 +167,6 @@ def parsear_fecha_archivo(filename: str) -> datetime | None:
         return datetime(año, mes, 1)
     except Exception:
         return None
-
-
-def listar_imagenes(carpeta: Path) -> list[dict]:
-    """Lista y ordena los .tiff de una carpeta."""
-    tiffs = list(carpeta.glob("*.tiff")) + list(carpeta.glob("*.tif"))
-    result = []
-    for t in tiffs:
-        fecha = parsear_fecha_archivo(t.name)
-        result.append({
-            "path": t,
-            "filename": t.name,
-            "fecha": fecha,
-            "label": fecha.strftime("%b %Y") if fecha else t.stem,
-        })
-    result.sort(key=lambda x: x["fecha"] or datetime.min)
-    return result
-
 
 def dms_to_decimal(dms_str):
     """Convierte coordenadas DMS a formato decimal."""
@@ -237,7 +190,6 @@ def stretch_percentile(band):
     band = np.clip((band - p2) / (p98 - p2), 0, 1)
     band = np.power(band, 1/1.2)  # ligera corrección gamma
     return band
-
 
 def generar_tiff_procesado(path_entrada, modo):
 
@@ -283,6 +235,54 @@ def generar_tiff_procesado(path_entrada, modo):
         dst.write(rgb_uint8)
 
     return tmp.name
+
+@st.cache_data(ttl=300, show_spinner=False)
+def listar_imagenes_supabase(bpin: str) -> list[dict]:
+    prefix = f"sentinel2_{bpin}/"
+    try:
+        res = sb.storage.from_(BUCKET).list(prefix)
+    except Exception as e:
+        st.error(f"Error accediendo al bucket: {e}")
+        return []
+    result = []
+    for item in res:
+        filename = item["name"]
+        if not filename.lower().endswith((".tiff", ".tif")):
+            continue
+        fecha = parsear_fecha_archivo(filename)
+        bucket_path = f"{prefix}{filename}"
+        result.append({
+            "bucket_path": bucket_path,
+            "filename":    filename,
+            "fecha":       fecha,
+            "label":       fecha.strftime("%b %Y") if fecha else Path(filename).stem,
+        })
+    result.sort(key=lambda x: x["fecha"] or datetime.min)
+    return result
+
+@st.cache_data(ttl=300, show_spinner=False)
+def descargar_tiff_temp(bucket_path: str) -> str:
+    signed = sb.storage.from_(BUCKET).create_signed_url(bucket_path, 600)
+    url = signed["signedURL"]
+    r = requests.get(url)
+    r.raise_for_status()
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".tiff")
+    tmp.write(r.content)
+    tmp.flush()
+    return tmp.name
+
+@st.cache_data(ttl=300, show_spinner=False)
+def descargar_tiff_temp(bucket_path: str) -> str:
+    """Descarga un TIFF a un archivo temporal y retorna su path."""
+    signed = sb.storage.from_(BUCKET).create_signed_url(bucket_path, 300)
+    url = signed["signedURL"]
+    r = requests.get(url)
+    suffix = ".tiff"
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    tmp.write(r.content)
+    tmp.flush()
+    return tmp.name
+
 # ──────────────────────────────────────────────
 # BARRA DE BÚSQUEDA SUPERIOR
 # ──────────────────────────────────────────────
@@ -310,20 +310,23 @@ if not bpin_input:
     st.info("👆 Ingresa un BPIN en la barra de búsqueda para comenzar.")
     st.stop()
 
-df = cargar_excel(EXCEL_PATH)
-proyecto = buscar_proyecto(df, bpin_input)
+proyecto = buscar_proyecto_supabase(bpin_input)
 
 if proyecto is None:
     st.error(f"❌ No se encontró el BPIN **{bpin_input}** en la base de datos.")
     st.stop()
 
 # Subtítulo con nombre
-nombre_proy = proyecto.get("nombre del proyecto", "Sin nombre")
+nombre_proy = proyecto.get("nombre_del_proyecto", "Sin nombre")
 st.markdown(f"## **BPIN** `{bpin_input}` - {nombre_proy}")
 st.markdown("")
 
 # Buscar carpeta de imágenes
-carpeta = encontrar_carpeta(bpin_input)
+imagenes = listar_imagenes_supabase(bpin_input)
+if not imagenes:
+    st.warning(f"No hay imágenes en Supabase para BPIN {bpin_input}.")
+    st.stop()
+ 
 
 # ──────────────────────────────────────────────
 # LAYOUT PRINCIPAL: sidebar izq + comparador der
@@ -342,42 +345,42 @@ with sidebar_col:
     st.markdown(f"""
     <div class="info-card">
         <div class="info-label">Nombre</div>
-        <div class="info-value">{fval("nombre del proyecto")}</div>
+        <div class="info-value">{fval("nombre_del_proyecto")}</div>
         <div class="info-label">Sector</div>
         <div class="info-value">{fval("sector")}</div>
         <div class="info-label">Alcance</div>
         <div class="info-value">{fval("alcance")}</div>
         <div class="info-label">Fase</div>
-        <div class="info-value"><span class="badge badge-blue">{fval("fase del proyecto")}</span></div>
+        <div class="info-value"><span class="badge badge-blue">{fval("fase_del_proyecto")}</span></div>
         <div class="info-label">Total Proyecto</div>
-        <div class="info-value info-mono">{fval("total proyecto")}</div>
+        <div class="info-value info-mono">{fval("total_proyecto")}</div>
         <div class="info-label">Instancia de Aprobación</div>
-        <div class="info-value">{fval("instancia de aprobación inicial")}</div>
+        <div class="info-value">{fval("instancia_de_aprobacion_inicial")}</div>
         <div class="info-label">Fecha de Aprobación</div>
-        <div class="info-value info-mono">{fval("fecha aprobación")}</div>
+        <div class="info-value info-mono">{fval("fecha_aprobacion")}</div>
     </div>
     """, unsafe_allow_html=True)
 
     st.markdown(f"""
     <div class="info-card">
         <div class="info-label">Entidad ejecutora</div>
-        <div class="info-value">{fval("entidad ejecutora")}</div>
+        <div class="info-value">{fval("entidad_ejecutora")}</div>
         <div class="info-label">NIT</div>
-        <div class="info-value info-mono">{fval("nit entidad ejecutora")}</div>
+        <div class="info-value info-mono">{fval("nit_entidad_ejecutora")}</div>
         <div class="info-label">Valor total contratos</div>
-        <div class="info-value info-mono">{fval("valor total de los contratos")}</div>
+        <div class="info-value info-mono">{fval("valor_total_de_los_contratos")}</div>
         <div class="info-label">Número de contratos</div>
-        <div class="info-value">{fval("numero de contratos asociados al proyecto")}</div>
+        <div class="info-value">{fval("numero_de_contratos_asociados_al_proyecto")}</div>
         <div class="info-label">Fechas programadas</div>
-        <div class="info-value info-mono">{fval("fecha inicial de la programación")} → {fval("fecha final de la programación")}</div>
+        <div class="info-value info-mono">{fval("fecha_inicial_de_la_programacion")} → {fval("fecha_final_de_la_programacion")}</div>
         <div class="info-label">Total pagos al proyecto</div>
-        <div class="info-value info-mono">{fval("total pagos al proyecto")}</div>
+        <div class="info-value info-mono">{fval("total_pagos_al_proyecto")}</div>
     </div>
     """, unsafe_allow_html=True)
 
     # Avances con barra visual
-    avance_fis = fval("avance físico", "0")
-    avance_fin = fval("avance financiero", "0")
+    avance_fis = fval("avance_fisico", "0")
+    avance_fin = fval("avance_financiero", "0")
     try:
         pct_fis = float(str(avance_fis).replace("%","").replace(",","."))
     except: pct_fis = 0
@@ -403,13 +406,8 @@ with sidebar_col:
     # ── REPOSITORIO DE IMÁGENES ──
     st.markdown('<div class="section-title">Imágenes disponibles</div>', unsafe_allow_html=True)
 
-    if carpeta is None:
-        st.warning(f"No se encontró carpeta `Sentinel2_{bpin_input}`")
-        st.stop()
-
-    imagenes = listar_imagenes(carpeta)
     if not imagenes:
-        st.warning("No hay archivos .tiff en la carpeta.")
+        st.warning("No hay imágenes en Supabase para este BPIN.")
         st.stop()
 
     # Agrupar por año
@@ -490,8 +488,10 @@ with main_col:
             modo = "natural"
 
         with st.spinner("Procesando GeoTIFFs para render profesional..."):
-            left_tif = generar_tiff_procesado(str(anterior["path"]), modo)
-            right_tif = generar_tiff_procesado(str(reciente["path"]), modo)
+            left_path = descargar_tiff_temp(anterior["bucket_path"])
+            right_path = descargar_tiff_temp(reciente["bucket_path"])
+            left_tif = generar_tiff_procesado(left_path, modo)
+            right_tif = generar_tiff_procesado(right_path, modo)
 
         m.split_map(
             left_layer=left_tif,
