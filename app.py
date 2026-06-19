@@ -21,7 +21,7 @@ from supabase import create_client
 
 load_dotenv()
 
-# ── Configuration 
+# ── Configuration ─────────────────────────────────────────────────
 
 st.set_page_config(
     page_title="SatView MVP",
@@ -236,7 +236,6 @@ def crear_mapa_individual(tiff_path: str, lat: float, lon: float,
     m = leafmap.Map(center=[lat, lon], zoom=14, draw_control=False,
                     measure_control=False, fullscreen_control=True)
     m.add_raster(tiff_path, layer_name=label)
-    add_project_marker(m, lat, lon, nombre)
     return m
 
 
@@ -409,6 +408,7 @@ with sidebar_col:
 
     # Comparison toggle
     modo_comparar = st.toggle("Modo comparacion (2 imagenes)", value=False)
+    mostrar_marcador = st.toggle("Mostrar ubicacion del proyecto", value=False)
 
 
 # ── Main area ─────────────────────────────────────────────────────
@@ -473,7 +473,8 @@ with main_col:
             left_label=f"Anterior ({anterior['label']})",
             right_label=f"Reciente ({reciente['label']})",
         )
-        add_project_marker(m, proj_lat, proj_lon, nombre_proy)
+        if mostrar_marcador:
+            add_project_marker(m, proj_lat, proj_lon, nombre_proy)
 
         c1, c2, c3 = st.columns(3)
         with c1:
@@ -527,4 +528,6 @@ with main_col:
                         gm = crear_mapa_individual(
                             item["tif"], proj_lat, proj_lon, nombre_proy, label,
                         )
+                        if mostrar_marcador:
+                            add_project_marker(gm, proj_lat, proj_lon, nombre_proy)
                         render_map(gm, height=420)
