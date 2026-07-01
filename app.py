@@ -9,6 +9,7 @@ import numpy as np
 from pathlib import Path
 from datetime import datetime
 import re
+import json
 import folium
 import leafmap.foliumap as leafmap
 from dotenv import load_dotenv
@@ -16,8 +17,9 @@ import os
 import rioxarray
 import rasterio
 import tempfile
-import requests
-from supabase import create_client
+import gspread
+from google.oauth2.service_account import Credentials
+from azure.storage.blob import BlobServiceClient
 
 load_dotenv()
 
@@ -30,10 +32,11 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_ANON_KEY")
-sb           = create_client(SUPABASE_URL, SUPABASE_KEY)
-BUCKET       = "sentinel-images"
+GOOGLE_SHEET_ID  = os.getenv("GOOGLE_SHEET_ID")
+GOOGLE_SHEET_TAB = os.getenv("GOOGLE_SHEET_TAB", "proyectos_satview")
+
+AZURE_CONN_STR  = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
+AZURE_CONTAINER = os.getenv("AZURE_CONTAINER", "imagenes-sentinel")
 
 MESES_ES = {
     "01": "Enero",   "02": "Febrero",    "03": "Marzo",      "04": "Abril",
@@ -94,12 +97,46 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# ── Helper functions ──────────────────────────────────────────────
+# ── Google Sheets (project metadata) ────────────────────────────────
 
-@st.cache_data(ttl=600, show_spinner=False)
-def buscar_proyecto_supabase(bpin: str) -> dict | None:
-    res = sb.table("proyectos").select("*").eq("bpin", bpin.strip()).execute()
-    return res.data[0] if res.data else None
+@st.cache_resource(show_spinner=False)
+def _google_sheets_client():
+    creds_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+    if not creds_json:
+        st.error("Missing environment variable: GOOGLE_SERVICE_ACCOUNT_JSON")
+        st.stop()
+    info   = json.loads(creds_json)
+    scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+    creds  = Credentials.from_service_account_info(info, scopes=scopes)
+    return gspread.authorize(creds)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def cargar_hoja_proyectos() -> pd.DataFrame:
+    client = _google_sheets_client()
+    sheet  = client.open_by_key(GOOGLE_SHEET_ID).worksheet(GOOGLE_SHEET_TAB)
+    data   = sheet.get_all_records()
+    df     = pd.DataFrame(data)
+    df.columns = [c.strip() for c in df.columns]
+    return df
+
+
+def buscar_proyecto(bpin: str) -> dict | None:
+    df = cargar_hoja_proyectos()
+    if df.empty or "bpin" not in df.columns:
+        return None
+    match = df[df["bpin"].astype(str).str.strip() == bpin.strip()]
+    if match.empty:
+        return None
+    return match.iloc[0].to_dict()
+
+
+# ── Azure Blob Storage (satellite images) ────────────────────────────
+
+@st.cache_resource(show_spinner=False)
+def _azure_container_client():
+    blob_service = BlobServiceClient.from_connection_string(AZURE_CONN_STR)
+    return blob_service.get_container_client(AZURE_CONTAINER)
 
 
 def parsear_fecha_archivo(filename: str) -> datetime | None:
@@ -111,6 +148,46 @@ def parsear_fecha_archivo(filename: str) -> datetime | None:
     except Exception:
         return None
 
+
+@st.cache_data(ttl=300, show_spinner=False)
+def listar_imagenes(bpin: str) -> list[dict]:
+    container_client = _azure_container_client()
+    prefix = f"sentinel2_{bpin}/"
+    result = []
+    try:
+        for blob in container_client.list_blobs(name_starts_with=prefix):
+            filename = blob.name.split("/")[-1]
+            if not filename.lower().endswith((".tiff", ".tif")):
+                continue
+            fecha = parsear_fecha_archivo(filename)
+            result.append({
+                "bucket_path": blob.name,
+                "filename":    filename,
+                "fecha":       fecha,
+                "label":       fecha.strftime("%b %Y") if fecha else Path(filename).stem,
+            })
+    except Exception as e:
+        st.error(f"Error accessing Azure Blob container: {e}")
+        return []
+    result.sort(key=lambda x: x["fecha"] or datetime.min)
+    return result
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def descargar_tiff_temp(bucket_path: str) -> str | None:
+    try:
+        container_client = _azure_container_client()
+        blob_client = container_client.get_blob_client(bucket_path)
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".tiff")
+        with open(tmp.name, "wb") as f:
+            f.write(blob_client.download_blob().readall())
+        return tmp.name
+    except Exception as e:
+        st.error(f"Failed to download {bucket_path}: {e}")
+        return None
+
+
+# ── Coordinate and image processing helpers ─────────────────────────
 
 def dms_to_decimal(dms_str) -> float | None:
     if pd.isna(dms_str) or not isinstance(dms_str, str):
@@ -172,47 +249,6 @@ def generar_tiff_procesado(path_entrada: str, modo: str) -> str:
     return tmp.name
 
 
-@st.cache_data(ttl=300, show_spinner=False)
-def listar_imagenes_supabase(bpin: str) -> list[dict]:
-    prefix = f"sentinel2_{bpin}/"
-    try:
-        res = sb.storage.from_(BUCKET).list(prefix)
-    except Exception as e:
-        st.error(f"Error accessing storage bucket: {e}")
-        return []
-
-    result = []
-    for item in res:
-        filename = item["name"]
-        if not filename.lower().endswith((".tiff", ".tif")):
-            continue
-        fecha = parsear_fecha_archivo(filename)
-        result.append({
-            "bucket_path": f"{prefix}{filename}",
-            "filename":    filename,
-            "fecha":       fecha,
-            "label":       fecha.strftime("%b %Y") if fecha else Path(filename).stem,
-        })
-    result.sort(key=lambda x: x["fecha"] or datetime.min)
-    return result
-
-
-@st.cache_data(ttl=300, show_spinner=False)
-def descargar_tiff_temp(bucket_path: str) -> str | None:
-    try:
-        signed = sb.storage.from_(BUCKET).create_signed_url(bucket_path, 600)
-        url = signed["signedURL"]
-        r = requests.get(url, timeout=120)
-        r.raise_for_status()
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".tiff")
-        tmp.write(r.content)
-        tmp.flush()
-        return tmp.name
-    except Exception as e:
-        st.error(f"Failed to download {bucket_path}: {e}")
-        return None
-
-
 def tiff_has_data(path: str) -> bool:
     try:
         data = rioxarray.open_rasterio(path)
@@ -231,8 +267,7 @@ def add_project_marker(mapa, lat: float, lon: float, nombre: str):
     ).add_to(mapa)
 
 
-def crear_mapa_individual(tiff_path: str, lat: float, lon: float,
-                          nombre: str, label: str) -> leafmap.Map:
+def crear_mapa_individual(tiff_path: str, lat: float, lon: float, label: str) -> leafmap.Map:
     m = leafmap.Map(center=[lat, lon], zoom=14, draw_control=False,
                     measure_control=False, fullscreen_control=True)
     m.add_raster(tiff_path, layer_name=label)
@@ -240,15 +275,12 @@ def crear_mapa_individual(tiff_path: str, lat: float, lon: float,
 
 
 def render_map(m, height: int = 600) -> None:
-    """Renderiza un mapa leafmap/folium en Streamlit.
-
-    Evita usar leafmap.to_streamlit(), que internamente guarda el mapa en un
-    HTML temporal y lo vuelve a leer con open() en modo texto. En Windows ese
-    open() usa el codec por defecto (cp1252) y revienta con
-    'charmap codec can't decode byte ...' en cuanto el mapa contiene cualquier
-    caracter no-ASCII (por ejemplo el nombre del proyecto con tildes o ñ, que
-    ahora se inyecta vía el marcador del proyecto). Aquí renderizamos el HTML
-    directamente en memoria como UTF-8, sin ese viaje al disco.
+    """
+    Renders a leafmap/folium map in Streamlit without going through
+    leafmap.to_streamlit(), which writes the map to a temp HTML file and
+    reads it back with a text-mode open(). On Windows that open() defaults
+    to cp1252, which crashes on any non-ASCII character (accents, tildes)
+    in the map content. This renders the HTML directly in memory as UTF-8.
     """
     import streamlit.components.v1 as components
     m.add_layer_control()
@@ -279,19 +311,19 @@ if not bpin_input:
     st.info("Ingresa un BPIN en la barra de busqueda para comenzar.")
     st.stop()
 
-proyecto = buscar_proyecto_supabase(bpin_input)
+proyecto = buscar_proyecto(bpin_input)
 
 if proyecto is None:
-    st.error(f"No se encontro el BPIN **{bpin_input}** en la base de datos.")
+    st.error(f"No se encontro el BPIN **{bpin_input}** en la hoja de proyectos.")
     st.stop()
 
 nombre_proy = proyecto.get("nombre_del_proyecto", "Sin nombre")
 st.markdown(f"## **BPIN** `{bpin_input}` - {nombre_proy}")
 st.markdown("")
 
-imagenes = listar_imagenes_supabase(bpin_input)
+imagenes = listar_imagenes(bpin_input)
 if not imagenes:
-    st.warning(f"No hay imagenes en Supabase para BPIN {bpin_input}.")
+    st.warning(f"No hay imagenes en Azure Blob Storage para BPIN {bpin_input}.")
     st.stop()
 
 # ── Resolve project coordinates once ─────────────────────────────
@@ -406,8 +438,8 @@ with sidebar_col:
         label_visibility="collapsed",
     )
 
-    # Comparison toggle
-    modo_comparar = st.toggle("Modo comparacion (2 imagenes)", value=False)
+    # Comparison and marker toggles
+    modo_comparar    = st.toggle("Modo comparacion (2 imagenes)", value=False)
     mostrar_marcador = st.toggle("Mostrar ubicacion del proyecto", value=False)
 
 
@@ -506,15 +538,14 @@ with main_col:
                 tif   = None if empty else generar_tiff_procesado(raw_path, modo)
                 processed.append({"img": img, "tif": tif, "empty": empty})
 
-        # Render in 2-column grid
         for row_start in range(0, len(processed), 2):
             row_items = processed[row_start:row_start + 2]
             cols = st.columns(2)
 
             for col, item in zip(cols, row_items):
                 with col:
-                    img   = item["img"]
-                    label = img["label"]
+                    img       = item["img"]
+                    label     = img["label"]
                     fecha_str = img["fecha"].strftime("%d/%m/%Y") if img["fecha"] else "-"
 
                     st.markdown(
@@ -525,9 +556,7 @@ with main_col:
                     if item["empty"]:
                         st.warning(f"Sin datos para {label} (nubosidad total).")
                     else:
-                        gm = crear_mapa_individual(
-                            item["tif"], proj_lat, proj_lon, nombre_proy, label,
-                        )
+                        gm = crear_mapa_individual(item["tif"], proj_lat, proj_lon, label)
                         if mostrar_marcador:
                             add_project_marker(gm, proj_lat, proj_lon, nombre_proy)
                         render_map(gm, height=420)
