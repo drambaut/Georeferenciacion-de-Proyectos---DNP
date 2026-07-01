@@ -1,24 +1,81 @@
-# 🛰️ SatView · Seguimiento Satelital de Obras Públicas
+# SatView · Seguimiento Satelital de Obras Públicas
 
-Aplicación Streamlit para visualizar y comparar imágenes Sentinel-2 de proyectos de construcción financiados con recursos SGR. Permite buscar un proyecto por BPIN, consultar su ficha técnica y comparar imágenes satelitales en el tiempo para seguir la evolución física de la obra.
+Aplicación web para visualizar y comparar imágenes satelitales Sentinel-2 de proyectos de infraestructura financiados con recursos del Sistema General de Regalías (SGR). Permite buscar un proyecto por su código BPIN, consultar su ficha técnica y observar la evolución física de la obra a través del tiempo mediante imágenes satelitales.
+
+**Aplicación en funcionamiento:** https://georeferenciacion-de-proyectos-dnp.onrender.com/
 
 ---
 
-## Arquitectura
+## Arquitectura general
+
+El sistema tiene tres piezas que viven en lugares distintos y se comunican entre sí:
 
 ```
-Supabase Storage (bucket: sentinel-images)
-  └── sentinel2_{BPIN}/
-        ├── 2025_01.tiff
-        ├── 2025_03.tiff
-        └── ...
-
-Supabase DB (tabla: proyectos)
-  └── 21 columnas con datos del proyecto (BPIN, avances, entidad, etc.)
-
-Streamlit App
-  └── Busca proyecto en DB → lista imágenes en Storage → renderiza comparador
+┌─────────────────────┐
+│   Google Sheets      │   Metadatos de cada proyecto (BPIN, coordenadas,
+│  (público, editable) │   nombre, sector, avances, etc.). Cualquier persona
+└──────────┬───────────┘   con el enlace puede agregar proyectos nuevos.
+           │
+           │ lectura (cuenta de servicio, solo lectura)
+           │
+     ┌─────┴──────┐
+     │            │
+     ▼            ▼
+┌─────────┐  ┌──────────────────┐
+│ app.py  │  │   pipeline.py     │   Se corre manualmente cuando hay
+│(Render) │  │  (ejecución local, │   proyectos nuevos. Descarga las
+│         │  │   bajo demanda)    │   imágenes faltantes y las sube.
+└────┬────┘  └─────────┬─────────┘
+     │                 │
+     │ lee imágenes    │ descarga de Copernicus, sube a
+     │                 │
+     ▼                 ▼
+┌──────────────────────────────┐
+│    Azure Blob Storage         │   Único lugar donde viven las imágenes
+│  sentinel2_{BPIN}/AAAA_MM.tiff│   satelitales (GeoTIFF).
+└──────────────────────────────┘
 ```
+
+No hay ninguna base de datos relacional en el sistema. El Google Sheet actúa como base de datos de metadatos, y Azure Blob Storage como almacén de imágenes. `pipeline.py` es el único componente que escribe datos (sube imágenes); todo lo demás solo lee.
+
+---
+
+## Flujo completo: de "agregar un proyecto" a "verlo en la app"
+
+### 1. Alguien agrega un proyecto nuevo
+
+Cualquier persona con el enlace del Google Sheet agrega una fila con los datos del proyecto: BPIN, nombre, sector, coordenadas en formato GMS (`latitud`, `longitud`), y el resto de la ficha técnica. No se necesita ningún permiso especial ni acceso a código.
+
+### 2. Aviso automático por correo
+
+Un script de Google Apps Script, vinculado al Sheet, detecta el cambio automáticamente (disparador `onChange`) y envía un correo a la lista de destinatarios configurada, indicando cuántas filas nuevas se agregaron y cuáles son. Esto avisa que hay trabajo pendiente, pero no descarga nada por sí solo.
+
+### 3. Alguien corre el pipeline manualmente
+
+Cuando conviene (no hace falta que sea inmediato), se ejecuta:
+
+```bash
+python pipeline.py
+```
+
+El script hace lo siguiente, en orden:
+
+1. **Lee el Google Sheet completo** usando la cuenta de servicio de Google (credenciales de solo lectura).
+2. **Revisa Azure Blob Storage** para cada proyecto del Sheet, y determina qué meses de imágenes ya existen ahí y cuáles faltan. Azure es la fuente de verdad — no se usa ningún archivo local para decidir qué está pendiente, así el resultado es correcto sin importar en qué máquina se corra.
+3. **Muestra un resumen** de los proyectos con imágenes faltantes y pide confirmación antes de continuar.
+4. **Descarga los meses faltantes desde Copernicus** (Sentinel-2 L2A) usando las funciones de `utils/Download_sat_imgs.py`: autenticación OIDC, filtro de nubosidad, máscara de nubes SCL, composición mensual por mediana, con reintentos automáticos ante límites de tasa (HTTP 429).
+5. **Sube cada imagen descargada a Azure Blob Storage** bajo la ruta `sentinel2_{BPIN}/{AAAA}_{MM}.tiff`, y borra la copia local para no acumular espacio en disco.
+6. **Registra todo** en `pipeline_log.txt` (log detallado) y `Imagenes/log_descarga.txt` (resumen de éxitos, fallos y meses sin datos disponibles por nubosidad).
+
+### 4. La aplicación muestra el resultado
+
+`app.py`, desplegada en Render, no participa en la descarga. Cuando alguien busca un BPIN:
+
+1. Lee el Google Sheet (con caché de 5 minutos) y busca la fila correspondiente al BPIN.
+2. Lista las imágenes disponibles en Azure Blob Storage para ese BPIN.
+3. El usuario selecciona una o varias imágenes desde el panel lateral.
+4. Cada imagen se descarga temporalmente, se procesa (selección de bandas según el modo de color, normalización por percentiles con manejo robusto de píxeles sin datos) y se renderiza en un mapa interactivo.
+5. Según el modo elegido, se muestra en **galería** (varias imágenes en cuadrícula) o en **comparación** (dos imágenes con cortina deslizable).
 
 ---
 
@@ -26,115 +83,82 @@ Streamlit App
 
 ```
 satview/
-├── app.py                  ← Aplicación principal
+├── app.py                        ← Aplicación Streamlit (desplegada en Render)
+├── pipeline.py                   ← Descarga y carga de imágenes (ejecución manual)
 ├── Dockerfile
-├── .env                    ← Variables de entorno (no subir a git)
+├── .env                          ← Variables de entorno (no subir a git)
 ├── .env.example
 ├── requirements.txt
+├── pipeline_state.json           ← Log de auditoría de la última corrida (no es fuente de verdad)
+├── pipeline_log.txt              ← Log detallado de la última corrida del pipeline
 └── utils/
-    ├── verificar_supabase.py
-    └── verificar_bucket.py
+    ├── Download_sat_imgs.py      ← Lógica de descarga desde Copernicus (reutilizada por pipeline.py)
+    ├── mostrar_tiff.py           ← Visualizador local de un GeoTIFF individual, con diagnóstico
+    └── verificar_bucket.py       ← Verifica conectividad con Azure Blob Storage
 ```
+
+> Los archivos dentro de `sql/` (creación de tabla, importación a Supabase) corresponden a una arquitectura anterior basada en Supabase y ya no forman parte del flujo activo. Se conservan solo como referencia histórica.
 
 ---
 
-## Variables de entorno
+## Configuración
+
+### Variables de entorno
 
 Crea un archivo `.env` en la raíz con:
 
 ```env
-SUPABASE_URL=https://xxxxxxxxxxxx.supabase.co
-SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+# Google Sheets (metadatos de proyectos)
+GOOGLE_SHEET_ID=el_id_de_tu_google_sheet
+GOOGLE_SHEET_TAB=Hoja 1
+GOOGLE_SERVICE_ACCOUNT_JSON={"type":"service_account", ... todo en una sola línea}
+
+# Azure Blob Storage (imágenes satelitales)
+AZURE_STORAGE_CONNECTION_STRING=DefaultEndpointsProtocol=https;AccountName=...
+AZURE_CONTAINER=nombre_del_contenedor
 ```
+
+### 1. Google Sheet (metadatos de proyectos)
+
+1. Crea una hoja de cálculo en Google Sheets con, como mínimo, estas columnas (en minúsculas, sin tildes, igual a como se muestran aquí):
+
+   `bpin`, `nombre_del_proyecto`, `sector`, `alcance`, `fase_del_proyecto`, `total_proyecto`, `instancia_de_aprobacion_inicial`, `fecha_aprobacion`, `entidad_ejecutora`, `nit_entidad_ejecutora`, `valor_total_de_los_contratos`, `numero_de_contratos_asociados`, `fecha_inicial_de_la_programacion`, `fecha_final_de_la_programacion`, `total_pagos_al_proyecto`, `avance_fisico`, `avance_financiero`, `latitud`, `longitud`, `georreferenciacion`
+
+2. `latitud` y `longitud` deben estar en formato GMS, por ejemplo `6°18'56.0"N` y `76°8'3.0"W`.
+3. Comparte el Sheet con acceso **"Cualquier persona con el enlace" → Editor**, para que cualquiera pueda agregar proyectos.
+4. Copia el ID del Sheet desde la URL (`.../spreadsheets/d/ESTE_ES_EL_ID/edit`) y ponlo en `GOOGLE_SHEET_ID`.
+
+### 2. Cuenta de servicio de Google (acceso de lectura)
+
+1. En [console.cloud.google.com](https://console.cloud.google.com), crea un proyecto y habilita **Google Sheets API** y **Google Drive API**.
+2. Crea una cuenta de servicio, genera una clave en formato JSON, y descárgala.
+3. Comparte el Google Sheet con el correo de la cuenta de servicio (rol **Lector**).
+4. Convierte el archivo JSON a una sola línea y pégalo como valor de `GOOGLE_SERVICE_ACCOUNT_JSON`:
+   ```bash
+   python -c "import json; print(json.dumps(json.load(open('service_account.json'))))"
+   ```
+
+### 3. Aviso automático de proyectos nuevos (Google Apps Script)
+
+1. Dentro del Google Sheet: **Extensiones → Apps Script**.
+2. Pega un script que compare el número de filas actual contra la última conocida (guardada en `PropertiesService`), y si hay filas nuevas, envíe un correo con `MailApp.sendEmail()` a la lista de destinatarios configurada.
+3. Activa un disparador instalable: **Triggers → Add Trigger → función `onChangeHandler` → evento "On change"**.
+4. Los destinatarios del correo se editan directamente en el arreglo `DESTINATARIOS` al inicio del script — no requiere tocar nada más.
+
+### 4. Azure Blob Storage (imágenes satelitales)
+
+1. Crea una cuenta de almacenamiento en Azure y, dentro de ella, un contenedor (por ejemplo `imagenes-sentinel`).
+2. Copia la cadena de conexión desde **Cuenta de almacenamiento → Seguridad y redes → Claves de acceso**, y ponla en `AZURE_STORAGE_CONNECTION_STRING`.
+3. Pon el nombre del contenedor en `AZURE_CONTAINER`.
+
+### 5. Copernicus / OpenEO (fuente de las imágenes)
+
+1. Crea una cuenta gratuita en [dataspace.copernicus.eu](https://dataspace.copernicus.eu/).
+2. La primera vez que corras `pipeline.py`, se abrirá el navegador para autenticarte (login OIDC). El cliente `openeo` guarda el token de sesión localmente, así que no hace falta repetir el login en cada corrida mientras el token siga vigente.
 
 ---
 
-## Supabase: configuración requerida
-
-### 1. Tabla `proyectos`
-
-Ejecuta `utils/1_crear_tabla_supabase.sql` en el SQL Editor de Supabase.
-
-Columnas utilizadas por la app:
-
-| Columna | Descripción |
-|---|---|
-| `bpin` | Código único del proyecto (índice) |
-| `nombre_del_proyecto` | |
-| `sector` | |
-| `alcance` | |
-| `fase_del_proyecto` | |
-| `total_proyecto` | |
-| `instancia_de_aprobacion_inicial` | |
-| `fecha_aprobacion` | |
-| `entidad_ejecutora` | |
-| `nit_entidad_ejecutora` | |
-| `valor_total_de_los_contratos` | |
-| `numero_de_contratos_asociados` | |
-| `fecha_inicial_de_la_programacion` | |
-| `fecha_final_de_la_programacion` | |
-| `total_pagos_al_proyecto` | |
-| `avance_fisico` | Porcentaje (ej: 67 o 67%) |
-| `avance_financiero` | Porcentaje (ej: 54 o 54%) |
-| `latitud` | Formato DMS (ej: 9°31'26.7"N) |
-| `longitud` | Formato DMS (ej: 75°33'56.1"W) |
-| `georreferenciacion` | Descripción textual |
-
-### 2. Políticas RLS (Row Level Security)
-
-Ejecuta en el SQL Editor:
-
-```sql
--- Lectura pública de la tabla proyectos
-CREATE POLICY "allow_select"
-ON proyectos FOR SELECT TO anon USING (true);
-
--- Lectura pública del bucket de imágenes
-CREATE POLICY "allow_anon_read"
-ON storage.objects FOR SELECT TO anon
-USING (bucket_id = 'sentinel-images');
-```
-
-### 3. Bucket de imágenes
-
-- Nombre: `sentinel-images`
-- Tipo: Private (acceso vía signed URLs)
-- Estructura de paths:
-
-```
-sentinel2_{BPIN}/2025_01.tiff
-sentinel2_{BPIN}/2025_03.tiff
-```
-
-### 4. Importar proyectos desde CSV
-
-```bash
-# Preparar el CSV desde el Excel original
-python utils/2_importar_proyectos.py --csv tu_archivo.csv --dry-run
-
-# Subir a Supabase (requiere SUPABASE_SERVICE_KEY en .env)
-python utils/2_importar_proyectos.py --csv tu_archivo.csv
-```
-
-> El CSV de origen usa separador `;`, codificación `latin-1`, y doble header (fila 0 = grupos, fila 1 = nombres).
-
----
-
-## Nombre de archivos TIFF
-
-El patrón esperado dentro de cada carpeta es:
-
-```
-<AÑO>_<MES>.tiff
-```
-
-Ejemplos válidos:
-- `2025_01.tiff`
-- `2025_06.tiff`
-
----
-
-## Instalación local
+## Instalación y ejecución local
 
 ```bash
 # 1. Clonar el repositorio
@@ -151,26 +175,35 @@ pip install -r requirements.txt
 
 # 4. Configurar variables de entorno
 cp .env.example .env
-# Edita .env con tus credenciales de Supabase
+# Edita .env con tus credenciales (ver sección Configuración)
 
-# 5. Ejecutar
+# 5. Ejecutar la aplicación
 streamlit run app.py
+
+# 6. Correr el pipeline de descarga (cuando haya proyectos nuevos)
+python pipeline.py
 ```
 
-> **Nota Windows:** si hay problemas con `rasterio`, instala con conda:
+> **Nota Windows:** si hay problemas instalando `rasterio`, usa conda:
 > ```bash
 > conda install -c conda-forge rasterio
 > ```
 
 ---
 
-## Despliegue con Docker
+## Despliegue
+
+La aplicación está desplegada en **Render** como Web Service, corriendo directamente sobre `requirements.txt` (no requiere el Dockerfile en ese entorno). Las variables de entorno se configuran en el panel de Render, en la sección **Environment**, con los mismos nombres que en `.env`.
+
+Comando de inicio en Render:
+```
+streamlit run app.py --server.port=$PORT --server.address=0.0.0.0
+```
+
+También es posible correr la app con Docker de forma local:
 
 ```bash
-# Construir imagen
 docker build -t satview .
-
-# Correr contenedor
 docker run -p 8501:8501 --env-file .env satview
 ```
 
@@ -178,13 +211,26 @@ Accede en: `http://localhost:8501`
 
 ---
 
-## Funcionalidades
+## Nombre de archivos de imágenes
 
-- 🔍 Búsqueda de proyectos por BPIN
-- 📊 Ficha completa con barras de avance físico y financiero
-- 🗺️ Mapa interactivo centrado en las coordenadas del proyecto
-- 📅 Repositorio de imágenes Sentinel-2 agrupado por año
-- 🖼️ Comparador lado a lado con slider sincronizado
-- 🎨 Modos de visualización: natural, escala de grises, falso color
-- ☁️ Imágenes servidas desde Supabase Storage (sin archivos locales)
-- 🗄️ Datos de proyectos en Supabase DB (sin Excel local)
+Dentro de cada carpeta `sentinel2_{BPIN}/` en Azure Blob Storage, el patrón esperado es:
+
+```
+<AÑO>_<MES>.tiff
+```
+
+Ejemplos válidos: `2025_01.tiff`, `2026_05.tiff`. La app y el pipeline dependen de este formato exacto para ordenar las imágenes cronológicamente y detectar qué meses ya están descargados.
+
+---
+
+## Funcionalidades de la aplicación
+
+- Búsqueda de proyectos por BPIN
+- Ficha técnica completa con barras de avance físico y financiero
+- Marcador opcional de ubicación exacta del proyecto sobre el mapa (útil en obras pequeñas)
+- Repositorio de imágenes Sentinel-2 agrupado por año
+- **Modo galería**: selecciona cualquier cantidad de imágenes y se muestran en cuadrícula, cada una con su fecha
+- **Modo comparación**: selecciona exactamente dos imágenes y se muestran lado a lado con cortina deslizable
+- Tres modos de visualización: color natural, escala de grises, falso color
+- Manejo robusto de imágenes con nubosidad: si una imagen no tiene datos válidos, se informa al usuario en vez de mostrar un mapa en blanco sin explicación
+- Metadatos leídos en vivo desde Google Sheets; imágenes servidas desde Azure Blob Storage
