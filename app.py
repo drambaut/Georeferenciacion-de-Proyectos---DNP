@@ -6,6 +6,7 @@ Run with: streamlit run app.py
 import streamlit as st
 import pandas as pd
 import numpy as np
+from io import BytesIO
 from pathlib import Path
 from datetime import datetime
 import re
@@ -18,6 +19,7 @@ import rioxarray
 import rasterio
 import tempfile
 import gspread
+import requests
 from google.oauth2.service_account import Credentials
 from azure.storage.blob import BlobServiceClient
 
@@ -34,6 +36,11 @@ st.set_page_config(
 
 GOOGLE_SHEET_ID  = os.getenv("GOOGLE_SHEET_ID")
 GOOGLE_SHEET_TAB = os.getenv("GOOGLE_SHEET_TAB", "proyectos_satview")
+PROJECT_METADATA_XLSX_URL = os.getenv("PROJECT_METADATA_XLSX_URL")
+PROJECT_METADATA_SHEET_NAME = os.getenv(
+    "PROJECT_METADATA_SHEET_NAME",
+    os.getenv("GOOGLE_SHEET_TAB", "proyectos_satview"),
+)
 
 AZURE_CONN_STR  = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
 AZURE_CONTAINER = os.getenv("AZURE_CONTAINER", "imagenes-sentinel")
@@ -111,8 +118,30 @@ def _google_sheets_client():
     return gspread.authorize(creds)
 
 
+def _metadata_download_url(url: str) -> str:
+    if "sharepoint.com" in url and "/:x:/" in url:
+        return url.split("?", 1)[0] + "?download=1"
+    return url
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def cargar_hoja_proyectos() -> pd.DataFrame:
+    if PROJECT_METADATA_XLSX_URL:
+        response = requests.get(_metadata_download_url(PROJECT_METADATA_XLSX_URL), timeout=120)
+        response.raise_for_status()
+        excel_bytes = BytesIO(response.content)
+        try:
+            df = pd.read_excel(
+                excel_bytes,
+                sheet_name=PROJECT_METADATA_SHEET_NAME,
+                dtype=str,
+            )
+        except ValueError:
+            excel_bytes.seek(0)
+            df = pd.read_excel(excel_bytes, sheet_name=0, dtype=str)
+        df.columns = [c.strip() for c in df.columns]
+        return df
+
     client = _google_sheets_client()
     sheet  = client.open_by_key(GOOGLE_SHEET_ID).worksheet(GOOGLE_SHEET_TAB)
     data   = sheet.get_all_records()

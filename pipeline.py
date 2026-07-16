@@ -19,12 +19,15 @@ import os
 import json
 import time
 import logging
+import argparse
+from io import BytesIO
 from pathlib import Path
 from datetime import datetime, timezone
 
 import pandas as pd
 import openeo
 import gspread
+import requests
 from google.oauth2.service_account import Credentials
 from dotenv import load_dotenv
 from azure.storage.blob import BlobServiceClient
@@ -48,6 +51,11 @@ load_dotenv()
 GOOGLE_SHEET_ID              = os.getenv("GOOGLE_SHEET_ID")
 GOOGLE_SHEET_TAB             = os.getenv("GOOGLE_SHEET_TAB", "Hoja 1")
 GOOGLE_SERVICE_ACCOUNT_JSON  = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+PROJECT_METADATA_XLSX_URL    = os.getenv("PROJECT_METADATA_XLSX_URL")
+PROJECT_METADATA_SHEET_NAME  = os.getenv(
+    "PROJECT_METADATA_SHEET_NAME",
+    os.getenv("GOOGLE_SHEET_TAB", "proyectos_satview"),
+)
 
 AZURE_CONN_STR  = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
 AZURE_CONTAINER = os.getenv("AZURE_CONTAINER", "imagenes-sentinel")
@@ -79,10 +87,11 @@ for noisy_logger in ("azure", "azure.core.pipeline.policies.http_logging_policy"
 
 def validar_configuracion() -> None:
     faltantes = []
-    if not GOOGLE_SHEET_ID:
-        faltantes.append("GOOGLE_SHEET_ID")
-    if not GOOGLE_SERVICE_ACCOUNT_JSON:
-        faltantes.append("GOOGLE_SERVICE_ACCOUNT_JSON")
+    if not PROJECT_METADATA_XLSX_URL:
+        if not GOOGLE_SHEET_ID:
+            faltantes.append("GOOGLE_SHEET_ID")
+        if not GOOGLE_SERVICE_ACCOUNT_JSON:
+            faltantes.append("GOOGLE_SERVICE_ACCOUNT_JSON")
     if not AZURE_CONN_STR:
         faltantes.append("AZURE_STORAGE_CONNECTION_STRING")
     if not AZURE_CONTAINER:
@@ -95,16 +104,44 @@ def validar_configuracion() -> None:
         print("\nCheck your .env file and that it sits next to pipeline.py.")
         sys.exit(1)
 
-    try:
-        json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
-    except json.JSONDecodeError as e:
-        print(f"GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON: {e}")
-        sys.exit(1)
+    if not PROJECT_METADATA_XLSX_URL:
+        try:
+            json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
+        except json.JSONDecodeError as e:
+            print(f"GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON: {e}")
+            sys.exit(1)
 
 
 # ── Google Sheets reading ───────────────────────────────────────────
 
+def _metadata_download_url(url: str) -> str:
+    """
+    Normalizes SharePoint/OneDrive viewer links to direct-download links.
+    Other URLs are left untouched.
+    """
+    if "sharepoint.com" in url and "/:x:/" in url:
+        return url.split("?", 1)[0] + "?download=1"
+    return url
+
+
 def leer_google_sheet() -> pd.DataFrame:
+    if PROJECT_METADATA_XLSX_URL:
+        response = requests.get(_metadata_download_url(PROJECT_METADATA_XLSX_URL), timeout=120)
+        response.raise_for_status()
+        excel_bytes = BytesIO(response.content)
+        try:
+            df = pd.read_excel(
+                excel_bytes,
+                sheet_name=PROJECT_METADATA_SHEET_NAME,
+                dtype=str,
+            )
+        except ValueError:
+            excel_bytes.seek(0)
+            df = pd.read_excel(excel_bytes, sheet_name=0, dtype=str)
+        df.columns = [c.strip() for c in df.columns]
+        df = df.astype(str)
+        return df
+
     scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
     info   = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
     creds  = Credentials.from_service_account_info(info, scopes=scopes)
@@ -218,12 +255,25 @@ def procesar_proyecto(connection, container_client, row: pd.Series,
 
 # ── Main (single run) ────────────────────────────────────────────────
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Download missing Sentinel-2 images and upload them to Azure Blob Storage."
+    )
+    parser.add_argument(
+        "--auto",
+        action="store_true",
+        help="Run without asking for manual confirmation before processing.",
+    )
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
     validar_configuracion()
 
-    log.info("Reading Google Sheet...")
+    log.info("Reading project metadata...")
     df = leer_google_sheet()
-    log.info(f"{len(df)} total rows in sheet.")
+    log.info(f"{len(df)} total rows in metadata source.")
 
     duplicados = df[df.duplicated(subset=["bpin"], keep=False)]["bpin"].unique()
     if len(duplicados) > 0:
@@ -231,7 +281,7 @@ def main():
         for bpin_dup in duplicados:
             print(f"  - {bpin_dup}")
         print("Only the first occurrence of each will be processed. Consider")
-        print("cleaning up the duplicate rows in the Google Sheet.")
+        print("cleaning up duplicate rows in the metadata source.")
         df = df.drop_duplicates(subset=["bpin"], keep="first")
 
     blob_service     = BlobServiceClient.from_connection_string(AZURE_CONN_STR)
@@ -253,10 +303,13 @@ def main():
         print(f"  - {bpin}: {nombre}")
         print(f"      pending: {meses_str}")
 
-    respuesta = input("\nProceed with download and upload for these? [y/N]: ").strip().lower()
-    if respuesta != "y":
-        print("Cancelled. No changes made.")
-        return
+    if not args.auto:
+        respuesta = input("\nProceed with download and upload for these? [y/N]: ").strip().lower()
+        if respuesta != "y":
+            print("Cancelled. No changes made.")
+            return
+    else:
+        log.info("Automatic mode active (--auto): skipping manual confirmation.")
 
     log.info("Authenticating with Copernicus...")
     connection = openeo.connect("openeo.dataspace.copernicus.eu")

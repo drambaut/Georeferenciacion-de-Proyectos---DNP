@@ -1,0 +1,45 @@
+name: SatView Pipeline
+
+on:
+  schedule:
+    # Sundays at 05:00 America/Bogota (UTC-5) => 10:00 UTC
+    - cron: "0 10 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: satview-pipeline
+  cancel-in-progress: false
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    env:
+      AZURE_STORAGE_CONNECTION_STRING: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
+      AZURE_CONTAINER: ${{ secrets.AZURE_CONTAINER }}
+      OPENEO_AUTH_METHOD: ${{ secrets.OPENEO_AUTH_METHOD }}
+      OPENEO_AUTH_CLIENT_ID: ${{ secrets.OPENEO_AUTH_CLIENT_ID }}
+      OPENEO_AUTH_CLIENT_SECRET: ${{ secrets.OPENEO_AUTH_CLIENT_SECRET }}
+      OPENEO_AUTH_PROVIDER_ID: ${{ secrets.OPENEO_AUTH_PROVIDER_ID }}
+      PROJECT_METADATA_XLSX_URL: ${{ secrets.PROJECT_METADATA_XLSX_URL }}
+      PROJECT_METADATA_SHEET_NAME: ${{ secrets.PROJECT_METADATA_SHEET_NAME }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run pipeline
+        run: python pipeline.py --auto
