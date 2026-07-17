@@ -11,12 +11,12 @@ Aplicación web para visualizar y comparar imágenes satelitales Sentinel-2 de p
 El sistema tiene tres piezas que viven en lugares distintos y se comunican entre sí:
 
 ```
-┌─────────────────────┐
-│   Google Sheets      │   Metadatos de cada proyecto (BPIN, coordenadas,
-│  (público, editable) │   nombre, sector, avances, etc.). Cualquier persona
+┌──────────────────────┐
+│  Excel compartido    │   Metadatos de cada proyecto (BPIN, coordenadas,
+│ (público, editable)  │   nombre, sector, avances, etc.). Cualquier persona
 └──────────┬───────────┘   con el enlace puede agregar proyectos nuevos.
            │
-           │ lectura (cuenta de servicio, solo lectura)
+           │ lectura (link compartido, solo lectura)
            │
      ┌─────┴──────┐
      │            │
@@ -36,7 +36,7 @@ El sistema tiene tres piezas que viven en lugares distintos y se comunican entre
 └──────────────────────────────┘
 ```
 
-No hay ninguna base de datos relacional en el sistema. El Google Sheet actúa como base de datos de metadatos, y Azure Blob Storage como almacén de imágenes. `pipeline.py` es el único componente que escribe datos (sube imágenes); todo lo demás solo lee.
+No hay ninguna base de datos relacional en el sistema. El Excel compartido actúa como base de datos de metadatos, y Azure Blob Storage como almacén de imágenes. `pipeline.py` es el único componente que escribe datos (sube imágenes); todo lo demás solo lee.
 
 ---
 
@@ -44,11 +44,11 @@ No hay ninguna base de datos relacional en el sistema. El Google Sheet actúa co
 
 ### 1. Alguien agrega un proyecto nuevo
 
-Cualquier persona con el enlace del Google Sheet agrega una fila con los datos del proyecto: BPIN, nombre, sector, coordenadas en formato GMS (`latitud`, `longitud`), y el resto de la ficha técnica. No se necesita ningún permiso especial ni acceso a código.
+Cualquier persona con el enlace del Excel compartido agrega una fila con los datos del proyecto: BPIN, nombre, sector, coordenadas en formato GMS (`latitud`, `longitud`), y el resto de la ficha técnica. No se necesita ningún permiso especial ni acceso a código.
 
 ### 2. Aviso automático por correo
 
-Un script de Google Apps Script, vinculado al Sheet, detecta el cambio automáticamente (disparador `onChange`) y envía un correo a la lista de destinatarios configurada, indicando cuántas filas nuevas se agregaron y cuáles son. Esto avisa que hay trabajo pendiente, pero no descarga nada por sí solo.
+Un script o flujo vinculado al Excel puede detectar el cambio automáticamente y enviar un correo a la lista de destinatarios configurada, indicando cuántas filas nuevas se agregaron y cuáles son. Esto avisa que hay trabajo pendiente, pero no descarga nada por sí solo.
 
 ### 3. Alguien corre el pipeline manualmente
 
@@ -58,10 +58,16 @@ Cuando conviene (no hace falta que sea inmediato), se ejecuta:
 python pipeline.py
 ```
 
+Si se quiere correr sin confirmación manual, por ejemplo en automatizaciones como GitHub Actions, se usa:
+
+```bash
+python pipeline.py --auto
+```
+
 El script hace lo siguiente, en orden:
 
-1. **Lee el Google Sheet completo** usando la cuenta de servicio de Google (credenciales de solo lectura).
-2. **Revisa Azure Blob Storage** para cada proyecto del Sheet, y determina qué meses de imágenes ya existen ahí y cuáles faltan. Azure es la fuente de verdad — no se usa ningún archivo local para decidir qué está pendiente, así el resultado es correcto sin importar en qué máquina se corra.
+1. **Lee el Excel compartido completo** usando el link configurado en `PROJECT_METADATA_XLSX_URL`.
+2. **Revisa Azure Blob Storage** para cada proyecto del Excel, y determina qué meses de imágenes ya existen ahí y cuáles faltan. Azure es la fuente de verdad — no se usa ningún archivo local para decidir qué está pendiente, así el resultado es correcto sin importar en qué máquina se corra.
 3. **Muestra un resumen** de los proyectos con imágenes faltantes y pide confirmación antes de continuar.
 4. **Descarga los meses faltantes desde Copernicus** (Sentinel-2 L2A) usando las funciones de `utils/Download_sat_imgs.py`: autenticación OIDC, filtro de nubosidad, máscara de nubes SCL, composición mensual por mediana, con reintentos automáticos ante límites de tasa (HTTP 429).
 5. **Sube cada imagen descargada a Azure Blob Storage** bajo la ruta `sentinel2_{BPIN}/{AAAA}_{MM}.tiff`, y borra la copia local para no acumular espacio en disco.
@@ -71,7 +77,7 @@ El script hace lo siguiente, en orden:
 
 `app.py`, desplegada en Render, no participa en la descarga. Cuando alguien busca un BPIN:
 
-1. Lee el Google Sheet (con caché de 5 minutos) y busca la fila correspondiente al BPIN.
+1. Lee el Excel compartido (con caché de 5 minutos) y busca la fila correspondiente al BPIN.
 2. Lista las imágenes disponibles en Azure Blob Storage para ese BPIN.
 3. El usuario selecciona una o varias imágenes desde el panel lateral.
 4. Cada imagen se descarga temporalmente, se procesa (selección de bandas según el modo de color, normalización por percentiles con manejo robusto de píxeles sin datos) y se renderiza en un mapa interactivo.
@@ -108,53 +114,47 @@ satview/
 Crea un archivo `.env` en la raíz con:
 
 ```env
-# Google Sheets (metadatos de proyectos)
-GOOGLE_SHEET_ID=el_id_de_tu_google_sheet
-GOOGLE_SHEET_TAB=Hoja 1
-GOOGLE_SERVICE_ACCOUNT_JSON={"type":"service_account", ... todo en una sola línea}
+# Excel compartido (metadatos de proyectos)
+PROJECT_METADATA_XLSX_URL=https://...
+PROJECT_METADATA_SHEET_NAME=proyectos_satview
 
 # Azure Blob Storage (imágenes satelitales)
 AZURE_STORAGE_CONNECTION_STRING=DefaultEndpointsProtocol=https;AccountName=...
 AZURE_CONTAINER=nombre_del_contenedor
+
+# Copernicus / openEO
+OPENEO_AUTH_METHOD=client_credentials
+OPENEO_AUTH_CLIENT_ID=sh-...
+OPENEO_AUTH_CLIENT_SECRET=...
+OPENEO_AUTH_PROVIDER_ID=CDSE
 ```
 
-### 1. Google Sheet (metadatos de proyectos)
+### 1. Excel compartido (metadatos de proyectos)
 
-1. Crea una hoja de cálculo en Google Sheets con, como mínimo, estas columnas (en minúsculas, sin tildes, igual a como se muestran aquí):
+1. Crea un archivo Excel compartido con, como mínimo, estas columnas (en minúsculas, sin tildes, igual a como se muestran aquí):
 
    `bpin`, `nombre_del_proyecto`, `sector`, `alcance`, `fase_del_proyecto`, `total_proyecto`, `instancia_de_aprobacion_inicial`, `fecha_aprobacion`, `entidad_ejecutora`, `nit_entidad_ejecutora`, `valor_total_de_los_contratos`, `numero_de_contratos_asociados`, `fecha_inicial_de_la_programacion`, `fecha_final_de_la_programacion`, `total_pagos_al_proyecto`, `avance_fisico`, `avance_financiero`, `latitud`, `longitud`, `georreferenciacion`
 
 2. `latitud` y `longitud` deben estar en formato GMS, por ejemplo `6°18'56.0"N` y `76°8'3.0"W`.
-3. Comparte el Sheet con acceso **"Cualquier persona con el enlace" → Editor**, para que cualquiera pueda agregar proyectos.
-4. Copia el ID del Sheet desde la URL (`.../spreadsheets/d/ESTE_ES_EL_ID/edit`) y ponlo en `GOOGLE_SHEET_ID`.
+3. Comparte el Excel con acceso **"Cualquier persona con el enlace" → Editor**, para que cualquiera pueda agregar proyectos.
+4. Copia el link compartido del Excel y ponlo en `PROJECT_METADATA_XLSX_URL`.
+5. Pon el nombre de la pestaña en `PROJECT_METADATA_SHEET_NAME`.
 
-### 2. Cuenta de servicio de Google (acceso de lectura)
-
-1. En [console.cloud.google.com](https://console.cloud.google.com), crea un proyecto y habilita **Google Sheets API** y **Google Drive API**.
-2. Crea una cuenta de servicio, genera una clave en formato JSON, y descárgala.
-3. Comparte el Google Sheet con el correo de la cuenta de servicio (rol **Lector**).
-4. Convierte el archivo JSON a una sola línea y pégalo como valor de `GOOGLE_SERVICE_ACCOUNT_JSON`:
-   ```bash
-   python -c "import json; print(json.dumps(json.load(open('service_account.json'))))"
-   ```
-
-### 3. Aviso automático de proyectos nuevos (Google Apps Script)
-
-1. Dentro del Google Sheet: **Extensiones → Apps Script**.
-2. Pega un script que compare el número de filas actual contra la última conocida (guardada en `PropertiesService`), y si hay filas nuevas, envíe un correo con `MailApp.sendEmail()` a la lista de destinatarios configurada.
-3. Activa un disparador instalable: **Triggers → Add Trigger → función `onChangeHandler` → evento "On change"**.
-4. Los destinatarios del correo se editan directamente en el arreglo `DESTINATARIOS` al inicio del script — no requiere tocar nada más.
-
-### 4. Azure Blob Storage (imágenes satelitales)
+### 2. Azure Blob Storage (imágenes satelitales)
 
 1. Crea una cuenta de almacenamiento en Azure y, dentro de ella, un contenedor (por ejemplo `imagenes-sentinel`).
 2. Copia la cadena de conexión desde **Cuenta de almacenamiento → Seguridad y redes → Claves de acceso**, y ponla en `AZURE_STORAGE_CONNECTION_STRING`.
 3. Pon el nombre del contenedor en `AZURE_CONTAINER`.
 
-### 5. Copernicus / OpenEO (fuente de las imágenes)
+### 3. Copernicus / OpenEO (fuente de las imágenes)
 
 1. Crea una cuenta gratuita en [dataspace.copernicus.eu](https://dataspace.copernicus.eu/).
-2. La primera vez que corras `pipeline.py`, se abrirá el navegador para autenticarte (login OIDC). El cliente `openeo` guarda el token de sesión localmente, así que no hace falta repetir el login en cada corrida mientras el token siga vigente.
+2. Crea un cliente OAuth y guarda su `client_id` y `client_secret`.
+3. Configura:
+   - `OPENEO_AUTH_METHOD=client_credentials`
+   - `OPENEO_AUTH_CLIENT_ID`
+   - `OPENEO_AUTH_CLIENT_SECRET`
+   - `OPENEO_AUTH_PROVIDER_ID=CDSE`
 
 ---
 
@@ -182,6 +182,9 @@ streamlit run app.py
 
 # 6. Correr el pipeline de descarga (cuando haya proyectos nuevos)
 python pipeline.py
+
+# 7. Correr el pipeline sin confirmación manual
+python pipeline.py --auto
 ```
 
 > **Nota Windows:** si hay problemas instalando `rasterio`, usa conda:
@@ -233,4 +236,4 @@ Ejemplos válidos: `2025_01.tiff`, `2026_05.tiff`. La app y el pipeline dependen
 - **Modo comparación**: selecciona exactamente dos imágenes y se muestran lado a lado con cortina deslizable
 - Tres modos de visualización: color natural, escala de grises, falso color
 - Manejo robusto de imágenes con nubosidad: si una imagen no tiene datos válidos, se informa al usuario en vez de mostrar un mapa en blanco sin explicación
-- Metadatos leídos en vivo desde Google Sheets; imágenes servidas desde Azure Blob Storage
+- Metadatos leídos en vivo desde el Excel compartido; imágenes servidas desde Azure Blob Storage

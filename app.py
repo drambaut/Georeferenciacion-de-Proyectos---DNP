@@ -10,7 +10,6 @@ from io import BytesIO
 from pathlib import Path
 from datetime import datetime
 import re
-import json
 import folium
 import leafmap.foliumap as leafmap
 from dotenv import load_dotenv
@@ -18,9 +17,7 @@ import os
 import rioxarray
 import rasterio
 import tempfile
-import gspread
 import requests
-from google.oauth2.service_account import Credentials
 from azure.storage.blob import BlobServiceClient
 
 load_dotenv()
@@ -34,12 +31,10 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-GOOGLE_SHEET_ID  = os.getenv("GOOGLE_SHEET_ID")
-GOOGLE_SHEET_TAB = os.getenv("GOOGLE_SHEET_TAB", "proyectos_satview")
 PROJECT_METADATA_XLSX_URL = os.getenv("PROJECT_METADATA_XLSX_URL")
 PROJECT_METADATA_SHEET_NAME = os.getenv(
     "PROJECT_METADATA_SHEET_NAME",
-    os.getenv("GOOGLE_SHEET_TAB", "proyectos_satview"),
+    "proyectos_satview",
 )
 
 AZURE_CONN_STR  = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
@@ -106,18 +101,6 @@ st.markdown("""
 
 # ── Google Sheets (project metadata) ────────────────────────────────
 
-@st.cache_resource(show_spinner=False)
-def _google_sheets_client():
-    creds_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
-    if not creds_json:
-        st.error("Missing environment variable: GOOGLE_SERVICE_ACCOUNT_JSON")
-        st.stop()
-    info   = json.loads(creds_json)
-    scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
-    creds  = Credentials.from_service_account_info(info, scopes=scopes)
-    return gspread.authorize(creds)
-
-
 def _metadata_download_url(url: str) -> str:
     if "sharepoint.com" in url and "/:x:/" in url:
         return url.split("?", 1)[0] + "?download=1"
@@ -126,26 +109,22 @@ def _metadata_download_url(url: str) -> str:
 
 @st.cache_data(ttl=300, show_spinner=False)
 def cargar_hoja_proyectos() -> pd.DataFrame:
-    if PROJECT_METADATA_XLSX_URL:
-        response = requests.get(_metadata_download_url(PROJECT_METADATA_XLSX_URL), timeout=120)
-        response.raise_for_status()
-        excel_bytes = BytesIO(response.content)
-        try:
-            df = pd.read_excel(
-                excel_bytes,
-                sheet_name=PROJECT_METADATA_SHEET_NAME,
-                dtype=str,
-            )
-        except ValueError:
-            excel_bytes.seek(0)
-            df = pd.read_excel(excel_bytes, sheet_name=0, dtype=str)
-        df.columns = [c.strip() for c in df.columns]
-        return df
+    if not PROJECT_METADATA_XLSX_URL:
+        st.error("Missing environment variable: PROJECT_METADATA_XLSX_URL")
+        st.stop()
 
-    client = _google_sheets_client()
-    sheet  = client.open_by_key(GOOGLE_SHEET_ID).worksheet(GOOGLE_SHEET_TAB)
-    data   = sheet.get_all_records()
-    df     = pd.DataFrame(data)
+    response = requests.get(_metadata_download_url(PROJECT_METADATA_XLSX_URL), timeout=120)
+    response.raise_for_status()
+    excel_bytes = BytesIO(response.content)
+    try:
+        df = pd.read_excel(
+            excel_bytes,
+            sheet_name=PROJECT_METADATA_SHEET_NAME,
+            dtype=str,
+        )
+    except ValueError:
+        excel_bytes.seek(0)
+        df = pd.read_excel(excel_bytes, sheet_name=0, dtype=str)
     df.columns = [c.strip() for c in df.columns]
     return df
 

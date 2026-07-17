@@ -19,6 +19,4 @@ tqdm
 pyqt5
 supabase>=2.0.0
 azure-storage-blob
-gspread
-google-auth
 openeo
