@@ -16,8 +16,11 @@ from dotenv import load_dotenv
 import os
 import rioxarray
 import rasterio
+from rasterio.warp import transform_bounds
 import tempfile
 import requests
+from PIL import Image
+from folium.plugins import SideBySideLayers
 from azure.storage.blob import BlobServiceClient
 
 load_dotenv()
@@ -266,6 +269,37 @@ def tiff_has_data(path: str) -> bool:
         return False
 
 
+def tif_to_png_overlay(tif_path: str) -> tuple[str, list]:
+    """
+    Converts a processed RGB GeoTIFF into a PNG with alpha (nodata -> transparent)
+    plus its bounds in [[south, west], [north, east]] (EPSG:4326), so it can be
+    added to a folium map as a static ImageOverlay.
+
+    We avoid leafmap's add_raster()/split_map(), which rely on `localtileserver`
+    spinning up its own internal HTTP server on a separate port. That works
+    locally but is unreachable in production behind Render's proxy (which only
+    exposes the single $PORT Streamlit binds to) -- the tiles silently fail to
+    load and the map shows blank. A static image overlay needs no extra server.
+    """
+    with rasterio.open(tif_path) as src:
+        arr = src.read()  # (3, h, w) uint8
+        bounds = src.bounds
+        crs = src.crs
+
+    if crs is not None and crs.to_epsg() != 4326:
+        bounds = transform_bounds(crs, "EPSG:4326", *bounds)
+
+    rgb = np.transpose(arr, (1, 2, 0))  # (h, w, 3)
+    alpha = np.where(rgb.sum(axis=2) == 0, 0, 255).astype(np.uint8)
+    rgba = np.dstack([rgb, alpha])
+
+    png_path = tif_path.rsplit(".", 1)[0] + ".png"
+    Image.fromarray(rgba, "RGBA").save(png_path)
+
+    img_bounds = [[bounds[1], bounds[0]], [bounds[3], bounds[2]]]  # [[south, west], [north, east]]
+    return png_path, img_bounds
+
+
 def add_project_marker(mapa, lat: float, lon: float, nombre: str):
     folium.Marker(
         location=[lat, lon],
@@ -276,9 +310,12 @@ def add_project_marker(mapa, lat: float, lon: float, nombre: str):
 
 
 def crear_mapa_individual(tiff_path: str, lat: float, lon: float, label: str) -> leafmap.Map:
+    png_path, img_bounds = tif_to_png_overlay(tiff_path)
     m = leafmap.Map(center=[lat, lon], zoom=14, draw_control=False,
                     measure_control=False, fullscreen_control=True)
-    m.add_raster(tiff_path, layer_name=label)
+    folium.raster_layers.ImageOverlay(
+        image=png_path, bounds=img_bounds, name=label, opacity=1,
+    ).add_to(m)
     return m
 
 
@@ -507,12 +544,24 @@ with main_col:
 
         m = leafmap.Map(center=[proj_lat, proj_lon], zoom=14,
                         draw_control=False, measure_control=False)
-        m.split_map(
-            left_layer=left_tif,
-            right_layer=right_tif,
-            left_label=f"Anterior ({anterior['label']})",
-            right_label=f"Reciente ({reciente['label']})",
-        )
+
+        if not left_empty:
+            left_png, left_bounds = tif_to_png_overlay(left_tif)
+            left_layer = folium.raster_layers.ImageOverlay(
+                image=left_png, bounds=left_bounds,
+                name=f"Anterior ({anterior['label']})", opacity=1,
+            )
+            left_layer.add_to(m)
+        if not right_empty:
+            right_png, right_bounds = tif_to_png_overlay(right_tif)
+            right_layer = folium.raster_layers.ImageOverlay(
+                image=right_png, bounds=right_bounds,
+                name=f"Reciente ({reciente['label']})", opacity=1,
+            )
+            right_layer.add_to(m)
+        if not left_empty and not right_empty:
+            SideBySideLayers(layer_left=left_layer, layer_right=right_layer).add_to(m)
+
         if mostrar_marcador:
             add_project_marker(m, proj_lat, proj_lon, nombre_proy)
 

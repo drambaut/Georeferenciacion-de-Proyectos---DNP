@@ -10,6 +10,7 @@ python-dotenv>=1.0.0
 rioxarray>=0.15.0
 xarray>=2023.0.0
 folium>=0.15.0
+Pillow>=10.0.0
 geopandas 
 shapely 
 requests
