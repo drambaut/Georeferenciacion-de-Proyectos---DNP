@@ -16,12 +16,29 @@ from dotenv import load_dotenv
 import os
 import rioxarray
 import rasterio
+
+# En Windows, otras instalaciones (PostgreSQL/PostGIS, QGIS, conda envs
+# previos) suelen registrar su propia variable de entorno PROJ_LIB/PROJ_DATA
+# a nivel de usuario/sistema, apuntando a un proj.db con un esquema
+# incompatible con el que trae empaquetado rasterio. Cuando eso pasa,
+# cualquier operacion de reproyeccion (transform_bounds mas abajo) falla con
+# "CRSError: The EPSG code is unknown", aunque el codigo este bien -- es un
+# conflicto de entorno, no un bug. Forzamos aqui el proj.db que trae rasterio
+# consigo mismo para que la app funcione sin importar que mas este instalado
+# en la maquina.
+_rasterio_proj_data = os.path.join(os.path.dirname(rasterio.__file__), "proj_data")
+if os.path.isdir(_rasterio_proj_data):
+    os.environ["PROJ_LIB"] = _rasterio_proj_data
+    os.environ["PROJ_DATA"] = _rasterio_proj_data
+
 from rasterio.warp import transform_bounds
 import tempfile
 import requests
 from PIL import Image
 from folium.plugins import SideBySideLayers
 from azure.storage.blob import BlobServiceClient
+
+from utils.Download_sat_imgs import carpeta_sentinel, calcular_tramos
 
 load_dotenv()
 
@@ -42,6 +59,12 @@ PROJECT_METADATA_SHEET_NAME = os.getenv(
 
 AZURE_CONN_STR  = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
 AZURE_CONTAINER = os.getenv("AZURE_CONTAINER", "imagenes-sentinel")
+
+# "azure" (default, produccion) o "local": lee las imagenes de una carpeta en
+# disco en vez de Azure Blob Storage. Util para probar sin credenciales/acceso
+# de Azure -- ver descargar_local.py para descargar a esa misma carpeta.
+IMAGE_STORAGE_MODE = os.getenv("IMAGE_STORAGE_MODE", "azure").strip().lower()
+LOCAL_IMAGES_DIR    = os.getenv("LOCAL_IMAGES_DIR", "Imagenes")
 
 MESES_ES = {
     "01": "Enero",   "02": "Febrero",    "03": "Marzo",      "04": "Abril",
@@ -98,6 +121,10 @@ st.markdown("""
     .gallery-label small {
         font-weight: 400; color: #64748b; font-family: monospace;
     }
+    .basemap-note {
+        font-size: 11px; color: #64748b; text-align: center;
+        margin: 4px 0 14px; font-style: italic;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -132,14 +159,18 @@ def cargar_hoja_proyectos() -> pd.DataFrame:
     return df
 
 
-def buscar_proyecto(bpin: str) -> dict | None:
+def buscar_tramos(bpin: str) -> list[dict] | None:
+    """Devuelve TODAS las filas del Excel que corresponden a este BPIN (una por
+    tramo), cada una con su columna 'tramo_slug' ya calculada. None si el BPIN
+    no aparece en la hoja."""
     df = cargar_hoja_proyectos()
     if df.empty or "bpin" not in df.columns:
         return None
     match = df[df["bpin"].astype(str).str.strip() == bpin.strip()]
     if match.empty:
         return None
-    return match.iloc[0].to_dict()
+    match = calcular_tramos(match)
+    return match.to_dict("records")
 
 
 # ── Azure Blob Storage (satellite images) ────────────────────────────
@@ -160,10 +191,9 @@ def parsear_fecha_archivo(filename: str) -> datetime | None:
         return None
 
 
-@st.cache_data(ttl=300, show_spinner=False)
-def listar_imagenes(bpin: str) -> list[dict]:
+def _listar_imagenes_azure(bpin: str, tramo_slug: str | None) -> list[dict]:
     container_client = _azure_container_client()
-    prefix = f"sentinel2_{bpin}/"
+    prefix = f"{carpeta_sentinel(bpin, tramo_slug)}/"
     result = []
     try:
         for blob in container_client.list_blobs(name_starts_with=prefix):
@@ -184,8 +214,41 @@ def listar_imagenes(bpin: str) -> list[dict]:
     return result
 
 
+def _listar_imagenes_local(bpin: str, tramo_slug: str | None) -> list[dict]:
+    carpeta = Path(LOCAL_IMAGES_DIR) / carpeta_sentinel(bpin, tramo_slug)
+    result = []
+    if not carpeta.is_dir():
+        return result
+    for archivo in sorted(carpeta.iterdir()):
+        if not archivo.is_file() or archivo.suffix.lower() not in (".tif", ".tiff"):
+            continue
+        fecha = parsear_fecha_archivo(archivo.name)
+        result.append({
+            # "bucket_path" es en realidad una ruta local real en este modo --
+            # se mantiene el mismo nombre de campo para que descargar_tiff_temp()
+            # y el resto del codigo (galeria/comparacion) no necesiten saber
+            # en que modo esta corriendo la app.
+            "bucket_path": str(archivo),
+            "filename":    archivo.name,
+            "fecha":       fecha,
+            "label":       fecha.strftime("%b %Y") if fecha else archivo.stem,
+        })
+    result.sort(key=lambda x: x["fecha"] or datetime.min)
+    return result
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def listar_imagenes(bpin: str, tramo_slug: str | None = None) -> list[dict]:
+    if IMAGE_STORAGE_MODE == "local":
+        return _listar_imagenes_local(bpin, tramo_slug)
+    return _listar_imagenes_azure(bpin, tramo_slug)
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def descargar_tiff_temp(bucket_path: str) -> str | None:
+    if IMAGE_STORAGE_MODE == "local":
+        # bucket_path ya es una ruta real en disco (ver _listar_imagenes_local).
+        return bucket_path if os.path.exists(bucket_path) else None
     try:
         container_client = _azure_container_client()
         blob_client = container_client.get_blob_client(bucket_path)
@@ -300,6 +363,22 @@ def tif_to_png_overlay(tif_path: str) -> tuple[str, list]:
     return png_path, img_bounds
 
 
+def agregar_basemap_satelital(mapa) -> None:
+    """Reemplaza el mapa base por defecto (OpenStreetMap, estilo calles) por
+    imagenes satelitales reales (Esri World Imagery). Sin esto, las zonas sin
+    datos de una imagen Sentinel-2 (nubes enmascaradas, fuera del bbox) se ven
+    como transparentes sobre un mapa de calles, lo cual luce muy poco realista
+    y hace parecer que hay un "hueco" en la imagen en vez de simplemente no
+    tener dato satelital ahi."""
+    folium.TileLayer(
+        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        attr="Esri, Maxar, Earthstar Geographics",
+        name="Satelite",
+        overlay=False,
+        control=False,
+    ).add_to(mapa)
+
+
 def add_project_marker(mapa, lat: float, lon: float, nombre: str):
     folium.Marker(
         location=[lat, lon],
@@ -313,10 +392,43 @@ def crear_mapa_individual(tiff_path: str, lat: float, lon: float, label: str) ->
     png_path, img_bounds = tif_to_png_overlay(tiff_path)
     m = leafmap.Map(center=[lat, lon], zoom=14, draw_control=False,
                     measure_control=False, fullscreen_control=True)
+    agregar_basemap_satelital(m)
     folium.raster_layers.ImageOverlay(
         image=png_path, bounds=img_bounds, name=label, opacity=1,
     ).add_to(m)
     return m
+
+
+def crear_mapa_overview(tramos_validos: list) -> leafmap.Map:
+    """Mapa con un marcador por cada tramo del proyecto, encuadrado para
+    mostrarlos todos juntos. Solo se usa cuando hay mas de un tramo."""
+    if len(tramos_validos) == 1:
+        t = tramos_validos[0]
+        m = leafmap.Map(center=[t["lat"], t["lon"]], zoom=14, draw_control=False,
+                        measure_control=False, fullscreen_control=True)
+    else:
+        m = leafmap.Map(draw_control=False, measure_control=False, fullscreen_control=True)
+    agregar_basemap_satelital(m)
+
+    for t in tramos_validos:
+        add_project_marker(m, t["lat"], t["lon"], t["nombre_tramo"])
+
+    if len(tramos_validos) > 1:
+        m.fit_bounds([[t["lat"], t["lon"]] for t in tramos_validos])
+
+    return m
+
+
+NOTA_BASEMAP = (
+    "El mapa de fondo (fuera del area cubierta por la imagen Sentinel-2, "
+    "por ejemplo en zonas de nubosidad) es una foto satelital reciente de "
+    "Esri sin fecha exacta -- no corresponde al mes mostrado, es solo "
+    "referencia visual del terreno."
+)
+
+
+def mostrar_nota_basemap() -> None:
+    st.markdown(f'<div class="basemap-note">{NOTA_BASEMAP}</div>', unsafe_allow_html=True)
 
 
 def render_map(m, height: int = 600) -> None:
@@ -356,34 +468,77 @@ if not bpin_input:
     st.info("Ingresa un BPIN en la barra de busqueda para comenzar.")
     st.stop()
 
-proyecto = buscar_proyecto(bpin_input)
+tramos = buscar_tramos(bpin_input)
 
-if proyecto is None:
+if tramos is None:
     st.error(f"No se encontro el BPIN **{bpin_input}** en la hoja de proyectos.")
     st.stop()
 
+proyecto = tramos[0]  # nombre/sector/alcance/etc. son idénticos en todas las filas-tramo
 nombre_proy = proyecto.get("nombre_del_proyecto", "Sin nombre")
 st.markdown(f"## **BPIN** `{bpin_input}` - {nombre_proy}")
 st.markdown("")
 
-imagenes = listar_imagenes(bpin_input)
-if not imagenes:
-    st.warning(f"No hay imagenes en Azure Blob Storage para BPIN {bpin_input}.")
+# ── Resolve coordinates per tramo (no fallback to Bogota: an unparseable
+# tramo is excluded and flagged, never silently mislocated) ──────────
+
+tramos_validos = []
+nombres_invalidos = []
+for t in tramos:
+    lat = dms_to_decimal(t.get("latitud"))
+    lon = dms_to_decimal(t.get("longitud"))
+    nombre_tramo = str(t.get("georreferenciacion") or "").strip() or nombre_proy
+    if lat is not None and lon is not None:
+        tramos_validos.append({**t, "lat": lat, "lon": lon, "nombre_tramo": nombre_tramo})
+    else:
+        nombres_invalidos.append(nombre_tramo)
+
+if nombres_invalidos:
+    st.warning(
+        f"No se pudieron ubicar {len(nombres_invalidos)} tramo(s) por coordenadas "
+        f"invalidas o faltantes: {', '.join(nombres_invalidos)}"
+    )
+
+if not tramos_validos:
+    st.error("Ninguno de los tramos de este proyecto tiene coordenadas validas.")
     st.stop()
 
-# ── Resolve project coordinates once ─────────────────────────────
-
-try:
-    proj_lat = dms_to_decimal(proyecto.get("latitud"))
-    proj_lon = dms_to_decimal(proyecto.get("longitud"))
-    if proj_lat is None or proj_lon is None:
-        raise ValueError("Invalid coordinates")
-except Exception:
-    proj_lat, proj_lon = 4.5709, -74.2973
-
 # ── Layout: sidebar + main area ──────────────────────────────────
+# El mapa/selector de tramos se escribe primero en main_col (arriba de la
+# galeria) para que quede al mismo nivel que "Informacion del Proyecto" en
+# sidebar_col -- ambas columnas parten desde el mismo punto vertical. Como
+# sidebar_col necesita saber que tramo esta activo (para filtrar imagenes),
+# el bloque de main_col se llena ANTES que sidebar_col, aunque sidebar_col
+# se vea a la izquierda -- el orden del codigo no determina el orden visual
+# en columnas de Streamlit, solo en que columna cae cada elemento.
 
 sidebar_col, main_col = st.columns([1, 3], gap="medium")
+
+with main_col:
+    if len(tramos_validos) > 1:
+        st.markdown(f"### Tramos del proyecto ({len(tramos_validos)})")
+        render_map(crear_mapa_overview(tramos_validos), height=350)
+        mostrar_nota_basemap()
+        idx_tramo = st.selectbox(
+            "Tramo",
+            options=list(range(len(tramos_validos))),
+            format_func=lambda i: tramos_validos[i]["nombre_tramo"],
+        )
+        tramo_activo = tramos_validos[idx_tramo]
+        st.divider()
+    else:
+        tramo_activo = tramos_validos[0]
+
+proj_lat = tramo_activo["lat"]
+proj_lon = tramo_activo["lon"]
+
+imagenes = listar_imagenes(bpin_input, tramo_activo.get("tramo_slug"))
+if not imagenes:
+    st.warning(
+        f"No hay imagenes en Azure Blob Storage para BPIN {bpin_input} "
+        f"(tramo: {tramo_activo['nombre_tramo']})."
+    )
+    st.stop()
 
 with sidebar_col:
     st.markdown('<div class="section-title">Informacion del Proyecto</div>', unsafe_allow_html=True)
@@ -468,7 +623,7 @@ with sidebar_col:
             for img in imgs:
                 checked = st.checkbox(
                     f"**{img['label']}**  `S-2`",
-                    key=f"cb_{img['filename']}",
+                    key=f"cb_{tramo_activo.get('tramo_slug') or 'default'}_{img['filename']}",
                     value=False,
                 )
                 if checked:
@@ -485,7 +640,7 @@ with sidebar_col:
 
     # Comparison and marker toggles
     modo_comparar    = st.toggle("Modo comparacion (2 imagenes)", value=False)
-    mostrar_marcador = st.toggle("Mostrar ubicacion del proyecto", value=False)
+    mostrar_marcador = st.toggle("Mostrar ubicacion del proyecto", value=True)
 
 
 # ── Main area ─────────────────────────────────────────────────────
@@ -544,6 +699,7 @@ with main_col:
 
         m = leafmap.Map(center=[proj_lat, proj_lon], zoom=14,
                         draw_control=False, measure_control=False)
+        agregar_basemap_satelital(m)
 
         if not left_empty:
             left_png, left_bounds = tif_to_png_overlay(left_tif)
@@ -563,7 +719,7 @@ with main_col:
             SideBySideLayers(layer_left=left_layer, layer_right=right_layer).add_to(m)
 
         if mostrar_marcador:
-            add_project_marker(m, proj_lat, proj_lon, nombre_proy)
+            add_project_marker(m, proj_lat, proj_lon, tramo_activo["nombre_tramo"])
 
         c1, c2, c3 = st.columns(3)
         with c1:
@@ -615,5 +771,5 @@ with main_col:
                     else:
                         gm = crear_mapa_individual(item["tif"], proj_lat, proj_lon, label)
                         if mostrar_marcador:
-                            add_project_marker(gm, proj_lat, proj_lon, nombre_proy)
+                            add_project_marker(gm, proj_lat, proj_lon, tramo_activo["nombre_tramo"])
                         render_map(gm, height=420)

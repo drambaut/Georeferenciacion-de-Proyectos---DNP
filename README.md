@@ -32,8 +32,9 @@ El sistema tiene tres piezas que viven en lugares distintos y se comunican entre
      ▼                 ▼
 ┌──────────────────────────────┐
 │    Azure Blob Storage         │   Único lugar donde viven las imágenes
-│  sentinel2_{BPIN}/AAAA_MM.tiff│   satelitales (GeoTIFF).
-└──────────────────────────────┘
+│  sentinel2_{BPIN}/AAAA_MM.tiff│   satelitales (GeoTIFF). Proyectos con
+└──────────────────────────────┘   varios tramos usan una carpeta por tramo
+                                    (ver "Nombre de archivos de imágenes").
 ```
 
 No hay ninguna base de datos relacional en el sistema. El Excel compartido actúa como base de datos de metadatos, y Azure Blob Storage como almacén de imágenes. `pipeline.py` es el único componente que escribe datos (sube imágenes); todo lo demás solo lee.
@@ -135,10 +136,20 @@ OPENEO_AUTH_PROVIDER_ID=CDSE
 
    `bpin`, `nombre_del_proyecto`, `sector`, `alcance`, `fase_del_proyecto`, `total_proyecto`, `instancia_de_aprobacion_inicial`, `fecha_aprobacion`, `entidad_ejecutora`, `nit_entidad_ejecutora`, `valor_total_de_los_contratos`, `numero_de_contratos_asociados`, `fecha_inicial_de_la_programacion`, `fecha_final_de_la_programacion`, `total_pagos_al_proyecto`, `avance_fisico`, `avance_financiero`, `latitud`, `longitud`, `georreferenciacion`
 
+   `tramo_id` es opcional y solo aplica a proyectos con varios tramos (ver más abajo).
+
 2. `latitud` y `longitud` deben estar en formato GMS, por ejemplo `6°18'56.0"N` y `76°8'3.0"W`.
 3. Comparte el Excel con acceso **"Cualquier persona con el enlace" → Editor**, para que cualquiera pueda agregar proyectos.
 4. Copia el link compartido del Excel y ponlo en `PROJECT_METADATA_XLSX_URL`.
 5. Pon el nombre de la pestaña en `PROJECT_METADATA_SHEET_NAME`.
+
+#### Proyectos con múltiples tramos
+
+Algunos proyectos (típicamente viales) no tienen una sola ubicación sino varios **tramos** separados por varios kilómetros entre sí — cada uno necesita su propio marcador en el mapa y sus propias imágenes satelitales, porque el buffer de descarga (`KM_BUFFER`, ver `utils/Download_sat_imgs.py`) es de solo 5 km alrededor de un punto.
+
+- Un BPIN con **una sola fila** en el Excel se comporta igual que siempre (un punto, sin cambios).
+- Un BPIN con **varias filas** (mismo `bpin`, distinta `latitud`/`longitud`/`georreferenciacion`) se trata automáticamente como multi-tramo: la app muestra todos los puntos juntos en un mapa de resumen, y un selector para elegir sobre cuál tramo ver la galería/comparación de imágenes.
+- Cada fila de un proyecto multi-tramo debe tener además la columna **`tramo_id`**: un número simple (`1`, `2`, `3`...) asignado **una sola vez** al crear la fila, que **nunca se debe volver a cambiar** aunque después se edite el texto de `georreferenciacion`. Es una columna puramente técnica/interna — nunca aparece en Azure ni es visible en la app — que permite detectar de forma segura cuando alguien edita el texto de un tramo existente (ver más abajo). Proyectos de un solo punto no necesitan esta columna.
 
 ### 2. Azure Blob Storage (imágenes satelitales)
 
@@ -192,6 +203,26 @@ python pipeline.py --auto
 > conda install -c conda-forge rasterio
 > ```
 
+### Modo local (sin Azure)
+
+Para probar la app y descargar imagenes sin tener acceso a Azure Blob Storage (por ejemplo, mientras se gestionan credenciales o permisos), se puede usar `descargar_local.py` en vez de `pipeline.py`, y correr `app.py` en modo local:
+
+```bash
+# En .env:
+# IMAGE_STORAGE_MODE=local
+# (no hacen falta las variables AZURE_*, solo las de Copernicus/openEO y el Excel)
+
+# Descarga a la carpeta Imagenes/ local, sin tocar Azure para nada:
+python descargar_local.py                    # solo un puñado de BPIN de prueba (ver BPINS_OBJETIVO_DEFAULT en el script)
+python descargar_local.py --bpin 123 456      # BPIN especificos
+python descargar_local.py --todos             # todos los proyectos de la hoja
+
+# La app lee de esa misma carpeta:
+streamlit run app.py
+```
+
+Las imagenes quedan organizadas con el mismo esquema de carpetas (`sentinel2_{BPIN}/` o `sentinel2_{BPIN}_{tramo}/`) que usaría Azure, así que cambiar `IMAGE_STORAGE_MODE` de vuelta a `azure` más adelante no requiere reorganizar nada.
+
 ---
 
 ## Despliegue
@@ -216,13 +247,34 @@ Accede en: `http://localhost:8501`
 
 ## Nombre de archivos de imágenes
 
-Dentro de cada carpeta `sentinel2_{BPIN}/` en Azure Blob Storage, el patrón esperado es:
+Dentro de cada carpeta en Azure Blob Storage, el patrón esperado es:
 
 ```
 <AÑO>_<MES>.tiff
 ```
 
 Ejemplos válidos: `2025_01.tiff`, `2026_05.tiff`. La app y el pipeline dependen de este formato exacto para ordenar las imágenes cronológicamente y detectar qué meses ya están descargados.
+
+El nombre de la carpeta depende de si el proyecto tiene uno o varios tramos:
+
+- **Proyecto de un solo punto** (la gran mayoría): `sentinel2_{BPIN}/` — sin cambios respecto al esquema original.
+- **Proyecto multi-tramo**: `sentinel2_{BPIN}_{tramo_slug}/`, una carpeta por tramo. `tramo_slug` se genera automáticamente a partir del texto de la columna `georreferenciacion` de esa fila (minúsculas, sin tildes, espacios → guiones), por ejemplo:
+
+  ```
+  sentinel2_2022002200043_la-ye-santa-lucia-barranca-lebrija/
+  sentinel2_2022002200043_aguachica-buturama-y-loma-corredor-y-puerto-mosquito/
+  ```
+
+  Ver `slugify_tramo()` y `carpeta_sentinel()` en `utils/Download_sat_imgs.py` — son las funciones que definen este esquema, usadas tanto por `pipeline.py` (al escribir) como por `app.py` (al leer), para que nunca queden desincronizadas.
+
+### Renombrado automático si cambia el texto de un tramo
+
+Si alguien edita el texto de `georreferenciacion` de una fila existente, el `tramo_slug` (y por lo tanto el nombre de la carpeta) cambia. Para no dejar imágenes "huérfanas" bajo el nombre viejo ni volver a descargarlas de Copernicus innecesariamente, `pipeline.py` guarda un manifiesto pequeño por proyecto multi-tramo (`sentinel2_{BPIN}/manifest.json`) que recuerda qué `tramo_id` corresponde a qué `tramo_slug`. En cada corrida:
+
+- Si un `tramo_id` sigue existiendo en el Excel pero su slug cambió, el pipeline **sabe con certeza que es el mismo tramo** (por el id estable) y renombra la carpeta en Azure automáticamente (mueve los archivos, no vuelve a descargar nada).
+- Si un `tramo_id` del manifiesto ya no aparece en el Excel (se borró la fila), su carpeta **no se toca ni se borra** — solo se registra un aviso (`WARNING`) en el log del pipeline, para revisión manual.
+
+Esto es también la razón por la que `tramo_id` no debe cambiarse una vez asignado: es la única forma en que el sistema puede distinguir "este tramo le cambiaron el texto" de "este tramo se borró y agregaron uno nuevo distinto".
 
 ---
 
